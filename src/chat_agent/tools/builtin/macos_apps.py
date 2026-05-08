@@ -1304,7 +1304,15 @@ for (const cal of calendars) {{
   if (!cal.exists()) {{
     return {{ ok: false, error: `calendar not found: ${{payload.calendar || payload.calendars[0]}}` }};
   }}
-  for (const event of cal.events()) {{
+  const dateFilter = {{}};
+  if (start) {{
+    dateFilter.endDate = {{ ">": start }};
+  }}
+  if (end) {{
+    dateFilter.startDate = {{ "<": end }};
+  }}
+  const events = (start || end) ? cal.events.whose(dateFilter)() : cal.events();
+  for (const event of events) {{
     const row = {{
       uid: event.uid(),
       title: event.summary(),

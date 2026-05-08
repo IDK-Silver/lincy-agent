@@ -261,6 +261,46 @@ def test_calendar_search_normalizes_range_with_app_offset(tmp_path: Path):
     assert result["results"][0]["end"] == "2026-05-06T20:00:00+08:00"
 
 
+def test_calendar_search_uses_date_filtered_events_when_range_present(tmp_path: Path):
+    bridge = MacOSAppBridge(
+        base_dir=tmp_path,
+        allowed_paths=[str(tmp_path)],
+        timeout_seconds=5,
+        max_search_results=10,
+        photos_export_dir="tmp/photos-exports",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_jxa_json(
+        body: str,
+        *,
+        payload: dict[str, object] | None = None,
+        **kwargs,
+    ):
+        captured["body"] = body
+        captured["payload"] = payload
+        return {"ok": True, "results": []}
+
+    bridge._run_jxa_json = fake_run_jxa_json  # type: ignore[method-assign]
+
+    result = bridge.calendar_search(
+        calendar=None,
+        calendars=None,
+        query=None,
+        start="2026-05-08T00:00",
+        end="2026-05-09T00:00",
+        all_day=None,
+        sort_by=None,
+        limit=10,
+    )
+
+    assert result["ok"] is True
+    body = str(captured["body"])
+    assert 'dateFilter.endDate = { ">": start };' in body
+    assert 'dateFilter.startDate = { "<": end };' in body
+    assert "cal.events.whose(dateFilter)()" in body
+
+
 def test_calendar_search_reports_truncation_when_limit_is_hit(tmp_path: Path):
     bridge = MacOSAppBridge(
         base_dir=tmp_path,
