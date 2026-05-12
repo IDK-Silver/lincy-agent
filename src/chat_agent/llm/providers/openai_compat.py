@@ -5,8 +5,6 @@ import logging
 import re
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 import httpx
 
 from ..schema import (
@@ -25,6 +23,8 @@ from ..schema import (
     ToolDefinition,
     make_tool_result_message,
 )
+
+logger = logging.getLogger(__name__)
 
 # Trailing-comma before closing brace/bracket: {"key": "val",} or ["a",]
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
@@ -145,9 +145,14 @@ class OpenAICompatibleClient:
             idx += 1
             while idx < len(messages) and messages[idx].role == "tool":
                 tool_msg = messages[idx]
-                repaired.append(tool_msg)
                 if tool_msg.tool_call_id in expected:
+                    repaired.append(tool_msg)
                     expected.pop(tool_msg.tool_call_id, None)
+                else:
+                    logger.warning(
+                        "Dropping orphan or duplicate tool result: %s",
+                        tool_msg.tool_call_id,
+                    )
                 idx += 1
 
             for missing_id, missing_name in expected.items():

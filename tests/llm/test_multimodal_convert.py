@@ -97,6 +97,41 @@ class TestOpenAICompatMultimodal:
         assert result[1].role == "tool"
         assert result[1].tool_call_id == "t1"
 
+    def test_drops_duplicate_tool_result_in_assistant_tool_group(self):
+        client = self._make_client()
+        messages = [
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(id="a", name="first", arguments={}),
+                    ToolCall(id="b", name="second", arguments={}),
+                ],
+            ),
+            Message(role="tool", content="first result", tool_call_id="a", name="first"),
+            Message(role="tool", content="second result", tool_call_id="b", name="second"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="c", name="third", arguments={})],
+            ),
+            Message(role="tool", content="third result", tool_call_id="c", name="third"),
+            Message(role="tool", content="duplicate old result", tool_call_id="b", name="second"),
+            Message(role="user", content="next"),
+        ]
+
+        result = client._convert_messages(messages)
+
+        assert [m.role for m in result] == [
+            "assistant",
+            "tool",
+            "tool",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert [m.tool_call_id for m in result if m.role == "tool"] == ["a", "b", "c"]
+
 
 class TestAnthropicMultimodal:
     def _make_client(self):
