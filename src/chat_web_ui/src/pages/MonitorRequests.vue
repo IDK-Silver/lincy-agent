@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { fetchAllRequests } from '@/api/client'
 import { useDashboardStore } from '@/stores/dashboard'
 import { useWebSocketStore } from '@/stores/websocket'
-import { formatCacheRate, formatCacheWriteTokens, formatCost, formatCostShort, formatTokens, formatLatency } from '@/lib/format'
+import { formatCacheRate, formatCacheWriteTokens, formatCost, formatCostShort, formatTokens, formatLatency, formatPricingSource, pricingSourceClass } from '@/lib/format'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import MonitorTabs from '@/components/dashboard/MonitorTabs.vue'
 import TimeRangeSelector from '@/components/dashboard/TimeRangeSelector.vue'
@@ -132,6 +132,7 @@ watch(() => dashStore.customTo, load)
             <TableHead class="w-20 text-right">Read Cache</TableHead>
             <TableHead class="w-24 text-right">Write Cache</TableHead>
             <TableHead class="w-16 text-right">Latency</TableHead>
+            <TableHead class="w-24 text-right">Pricing</TableHead>
             <TableHead class="w-20 text-right">Cost</TableHead>
           </TableRow>
         </TableHeader>
@@ -170,6 +171,16 @@ watch(() => dashStore.customTo, load)
             </TableCell>
             <TableCell class="text-xs text-right tabular-nums">
               {{ formatLatency((r.latency_ms as number) || 0) }}
+            </TableCell>
+            <TableCell
+              class="text-xs text-right"
+              :class="pricingSourceClass(r.pricing_stale as boolean | null)"
+              :title="(r.pricing_source_url as string) || undefined"
+            >
+              {{ formatPricingSource(
+                r.pricing_source as string | null,
+                r.pricing_stale as boolean | null,
+              ) }}
             </TableCell>
             <TableCell class="text-xs text-right tabular-nums text-[#111827]">
               {{ formatCost(r.cost as number) }}

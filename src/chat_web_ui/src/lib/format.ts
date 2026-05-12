@@ -37,3 +37,37 @@ export function formatLatency(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
   return `${ms}ms`
 }
+
+type PricingSource = {
+  source?: string | null
+  stale?: boolean | null
+  count?: number | null
+}
+
+function pricingSourceLabel(source: string | null | undefined): string {
+  if (!source) return '-'
+  if (source === 'local_override') return 'Local override'
+  if (source === 'litellm_cache') return 'LiteLLM cache'
+  if (source === 'litellm') return 'LiteLLM'
+  return source
+}
+
+export function formatPricingSource(
+  source: string | null | undefined,
+  stale: boolean | null | undefined,
+): string {
+  if (!source) return '-'
+  return stale ? `${pricingSourceLabel(source)} stale` : pricingSourceLabel(source)
+}
+
+export function formatPricingSources(sources: unknown): string {
+  if (!Array.isArray(sources) || sources.length === 0) return 'Pricing unavailable'
+  const labels = sources
+    .filter((item): item is PricingSource => item && typeof item === 'object')
+    .map((item) => formatPricingSource(item.source, item.stale))
+  return Array.from(new Set(labels)).join(', ')
+}
+
+export function pricingSourceClass(stale: boolean | null | undefined): string {
+  return stale ? 'text-[#B45309]' : 'text-[#6B7280]'
+}

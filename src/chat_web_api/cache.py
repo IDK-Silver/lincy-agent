@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .pricing import ModelPricing, compute_request_cost
+from .pricing import ModelPricing, compute_request_cost, get_pricing_metadata
 from .session_reader import (
     SessionFiles,
     discover_sessions,
@@ -64,6 +64,28 @@ def _aggregate_write_cache_measurable(
     return bool(rows) and all(_is_write_cache_measurable(row.provider) for row in rows)
 
 
+def _aggregate_pricing_sources(rows: list[ResponseMetrics]) -> list[dict]:
+    counts: dict[tuple[str, str | None, bool], int] = {}
+    for row in rows:
+        if row.pricing_source is None:
+            continue
+        key = (row.pricing_source, row.pricing_source_url, row.pricing_stale)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        {
+            "source": source,
+            "source_url": source_url,
+            "stale": stale,
+            "count": count,
+        }
+        for (source, source_url, stale), count in sorted(counts.items())
+    ]
+
+
+def _has_stale_pricing(rows: list[ResponseMetrics]) -> bool:
+    return any(row.pricing_stale for row in rows)
+
+
 @dataclass
 class ResponseMetrics:
     ts: datetime
@@ -78,6 +100,9 @@ class ResponseMetrics:
     cost: float | None
     turn_id: str | None
     client_label: str | None = None
+    pricing_source: str | None = None
+    pricing_source_url: str | None = None
+    pricing_stale: bool = False
 
 
 @dataclass
@@ -114,6 +139,8 @@ class SessionSummary:
     cache_hit_rate: float | None
     write_cache_measurable: bool
     peak_prompt_tokens: int
+    pricing_sources: list[dict]
+    pricing_stale: bool
 
 
 @dataclass
@@ -130,6 +157,8 @@ class DashboardSummary:
     cache_hit_rate: float | None
     write_cache_measurable: bool
     daily_costs: list[dict]  # [{date, cost, turns}]
+    pricing_sources: list[dict]
+    pricing_stale: bool
 
 
 class MetricsCache:
@@ -216,6 +245,11 @@ class MetricsCache:
                 resp = rec.response
                 if resp is None:
                     continue
+                pricing_meta = get_pricing_metadata(
+                    rec.provider,
+                    rec.model,
+                    self.pricing,
+                )
                 cost = compute_request_cost(
                     provider=rec.provider,
                     model=rec.model,
@@ -238,6 +272,11 @@ class MetricsCache:
                     cost=cost,
                     turn_id=rec.turn_id,
                     client_label=rec.client_label,
+                    pricing_source=pricing_meta.source if pricing_meta else None,
+                    pricing_source_url=(
+                        pricing_meta.source_url if pricing_meta else None
+                    ),
+                    pricing_stale=pricing_meta.stale if pricing_meta else False,
                 )
                 self._responses[session_id].append(rm)
 
@@ -297,6 +336,8 @@ class MetricsCache:
             cache_hit_rate=hit_rate,
             write_cache_measurable=_aggregate_write_cache_measurable(responses),
             peak_prompt_tokens=peak,
+            pricing_sources=_aggregate_pricing_sources(responses),
+            pricing_stale=_has_stale_pricing(responses),
         )
 
     def get_sessions_in_range(
@@ -317,6 +358,7 @@ class MetricsCache:
 
     def get_dashboard(self, date_from: date, date_to: date) -> DashboardSummary:
         sessions = self.get_sessions_in_range(date_from, date_to)
+        all_responses: list[ResponseMetrics] = []
         total_cost = 0.0
         total_turns = 0
         total_prompt = 0
@@ -325,6 +367,8 @@ class MetricsCache:
         daily: dict[date, dict] = {}
 
         for s in sessions:
+            session_responses = self._responses.get(s.session_id, [])
+            all_responses.extend(session_responses)
             if s.total_cost is not None:
                 total_cost += s.total_cost
             total_turns += s.turn_count
@@ -343,6 +387,7 @@ class MetricsCache:
                     "cache_write": 0,
                     "read_cache_measurable": True,
                     "write_cache_measurable": True,
+                    "pricing_stale": False,
                 }
             if s.total_cost is not None:
                 daily[d]["cost"] += s.total_cost
@@ -356,6 +401,9 @@ class MetricsCache:
             )
             daily[d]["write_cache_measurable"] = (
                 daily[d]["write_cache_measurable"] and s.write_cache_measurable
+            )
+            daily[d]["pricing_stale"] = (
+                daily[d]["pricing_stale"] or s.pricing_stale
             )
 
         hit_rate = total_cr / (total_cr + total_cw) if (total_cr + total_cw) > 0 else None
@@ -392,6 +440,8 @@ class MetricsCache:
                 s.write_cache_measurable for s in sessions
             ) if sessions else False,
             daily_costs=daily_list,
+            pricing_sources=_aggregate_pricing_sources(all_responses),
+            pricing_stale=_has_stale_pricing(all_responses),
         )
 
     def get_session_detail(self, session_id: str) -> dict | None:
@@ -418,6 +468,8 @@ class MetricsCache:
                 "total_cache_read": summary.total_cache_read,
                 "total_cache_write": summary.total_cache_write,
                 "write_cache_measurable": summary.write_cache_measurable,
+                "pricing_sources": summary.pricing_sources,
+                "pricing_stale": summary.pricing_stale,
             },
             "turns": [_serialize_turn(t) for t in turns],
         }
@@ -456,6 +508,9 @@ class MetricsCache:
                     "latency_ms": rm.latency_ms,
                     "cost": rm.cost,
                     "client_label": rm.client_label,
+                    "pricing_source": rm.pricing_source,
+                    "pricing_source_url": rm.pricing_source_url,
+                    "pricing_stale": rm.pricing_stale,
                 })
         results.sort(key=lambda r: r["ts"])
         return results
@@ -495,8 +550,8 @@ class MetricsCache:
             "session_id": sid,
             "prompt_tokens": last_prompt,
             "soft_limit": soft_limit,
-        "hard_limit": hard_limit,
-    }
+            "hard_limit": hard_limit,
+        }
 
 
 def _serialize_turn(t: TurnMetrics) -> dict:
@@ -515,6 +570,8 @@ def _serialize_turn(t: TurnMetrics) -> dict:
         "cache_write_tokens": t.cache_write_tokens,
         "write_cache_measurable": t.write_cache_measurable,
         "total_cost": t.total_cost,
+        "pricing_sources": _aggregate_pricing_sources(t.responses),
+        "pricing_stale": _has_stale_pricing(t.responses),
         "responses": [
             {
                 "round": r.round,
@@ -533,6 +590,9 @@ def _serialize_turn(t: TurnMetrics) -> dict:
                 "latency_ms": r.latency_ms,
                 "cost": r.cost,
                 "client_label": r.client_label,
+                "pricing_source": r.pricing_source,
+                "pricing_source_url": r.pricing_source_url,
+                "pricing_stale": r.pricing_stale,
             }
             for r in t.responses
         ],

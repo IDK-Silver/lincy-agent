@@ -3,7 +3,7 @@ import { ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchSessionDetail } from '@/api/client'
 import { useWebSocketStore } from '@/stores/websocket'
-import { formatCacheRate, formatCacheWriteTokens, formatCostShort, formatCost, formatTokens, formatLatency } from '@/lib/format'
+import { formatCacheRate, formatCacheWriteTokens, formatCostShort, formatCost, formatTokens, formatLatency, formatPricingSource, formatPricingSources, pricingSourceClass } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 
@@ -69,6 +69,12 @@ watch(() => route.params.id, load)
             {{ formatCostShort(((detail.summary as Record<string, unknown>)?.total_cost as number) ?? null) }}
           </div>
           <div class="text-xs text-[#6B7280] mt-1">Total Cost</div>
+          <div
+            class="mt-1 truncate text-[10px] text-[#6B7280]"
+            :title="formatPricingSources((detail.summary as Record<string, unknown>)?.pricing_sources)"
+          >
+            {{ formatPricingSources((detail.summary as Record<string, unknown>)?.pricing_sources) }}
+          </div>
         </CardContent>
       </Card>
       <Card class="border-[#E5E7EB] shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
@@ -174,6 +180,16 @@ watch(() => route.params.id, load)
                 ) }}
               </span>
               <span class="w-14">{{ formatLatency((resp.latency_ms as number) || 0) }}</span>
+              <span
+                class="w-24 truncate text-right"
+                :class="pricingSourceClass(resp.pricing_stale as boolean | null)"
+                :title="(resp.pricing_source_url as string) || undefined"
+              >
+                {{ formatPricingSource(
+                  resp.pricing_source as string | null,
+                  resp.pricing_stale as boolean | null,
+                ) }}
+              </span>
               <span class="ml-auto text-[#111827]">{{ formatCost(resp.cost as number) }}</span>
             </div>
           </div>

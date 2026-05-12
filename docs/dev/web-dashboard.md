@@ -48,6 +48,8 @@ cost = base_input × input_rate + cache_read × cr_rate + cache_write × cw_rate
 
 Pricing 來源：`https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`
 
+本專案可在 `src/chat_web_api/pricing.py` 維護本地 override，處理 LiteLLM 尚未更新或價格不符合本專案口徑的模型。DeepSeek V4 目前使用官方原價計算，不使用 DeepSeek 官網列出的 75% 折扣價；override 會帶 `pricing_source=local_override`、`pricing_source_url` 與 stale 狀態，前端會在 Total Cost 與 request breakdown 顯示。
+
 ### 增量讀取
 
 JSONL 是 append-only，每個檔案追蹤 `byte_offset`：

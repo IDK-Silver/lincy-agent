@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useDashboardStore } from '@/stores/dashboard'
-import { formatCacheRate, formatCacheWriteTokens, formatCostShort } from '@/lib/format'
+import { formatCacheRate, formatCacheWriteTokens, formatCostShort, formatPricingSources } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
 
 const store = useDashboardStore()
@@ -10,7 +10,11 @@ const cards = computed(() => {
   const s = store.summary as Record<string, unknown> | null
   if (!s) return []
   return [
-    { label: 'Total Cost', value: formatCostShort(s.total_cost as number | null) },
+    {
+      label: 'Total Cost',
+      value: formatCostShort(s.total_cost as number | null),
+      detail: formatPricingSources(s.pricing_sources),
+    },
     { label: 'Turns', value: String((s.total_turns as number | undefined) ?? 0) },
     { label: 'Sessions', value: String((s.total_sessions as number | undefined) ?? 0) },
     { label: 'Read Cache Rate', value: formatCacheRate(s.read_cache_rate as number | null) },
@@ -31,6 +35,9 @@ const cards = computed(() => {
       <CardContent class="pt-4 pb-4">
         <div class="text-2xl font-semibold text-[#111827] tabular-nums">{{ c.value }}</div>
         <div class="text-xs text-[#6B7280] mt-1">{{ c.label }}</div>
+        <div v-if="c.detail" class="mt-1 truncate text-[10px] text-[#6B7280]" :title="c.detail">
+          {{ c.detail }}
+        </div>
       </CardContent>
     </Card>
   </div>

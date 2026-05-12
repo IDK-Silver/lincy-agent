@@ -118,6 +118,8 @@ def create_app(settings: WebApiSettings) -> FastAPI:
             "cache_hit_rate": summary.cache_hit_rate,
             "write_cache_measurable": summary.write_cache_measurable,
             "daily_costs": summary.daily_costs,
+            "pricing_sources": summary.pricing_sources,
+            "pricing_stale": summary.pricing_stale,
         }
 
     @app.get("/api/sessions")
@@ -146,6 +148,8 @@ def create_app(settings: WebApiSettings) -> FastAPI:
                     "total_cache_write": s.total_cache_write,
                     "write_cache_measurable": s.write_cache_measurable,
                     "peak_prompt_tokens": s.peak_prompt_tokens,
+                    "pricing_sources": s.pricing_sources,
+                    "pricing_stale": s.pricing_stale,
                 }
                 for s in page
             ],
