@@ -9,11 +9,10 @@ from chat_agent.context.builder import (
     ContextBuilder,
     _TOOL_BOOT_CALL_ID,
     _TOOL_BOOT_NAME,
-    _PINNED_CALL_ID,
     _PINNED_TOOL_NAME,
 )
 from chat_agent.context.conversation import Conversation
-from chat_agent.llm.schema import ContentPart, Message, ToolCall
+from chat_agent.llm.schema import Message, ToolCall
 
 
 def test_boot_files_injected_as_core_rules(tmp_path: Path):
@@ -145,6 +144,55 @@ def test_builder_cache_breakpoint_stays_before_current_turn_after_tool_round():
     assert breakpoint_msg.role == "assistant"
     assert isinstance(breakpoint_msg.content, str)
     assert "a1" in breakpoint_msg.content
+
+
+def test_import_render_cache_accepts_matching_sources():
+    builder = ContextBuilder(system_prompt="sys")
+    conv = Conversation()
+    conv.add("user", "hello", channel="discord", sender="alice")
+    conv.add_assistant_with_tools(
+        None,
+        [ToolCall(id="tc1", name="send_message", arguments={"body": "hi"})],
+    )
+    conv.add_tool_result("tc1", "send_message", "OK")
+
+    rendered = builder.build(conv)
+    exported = builder.export_render_cache()
+
+    restored = ContextBuilder(system_prompt="sys")
+    assert restored.import_render_cache(exported, conv.get_messages()) is True
+    assert restored.export_render_cache() == rendered[-len(exported):]
+
+
+def test_import_render_cache_rejects_stale_position_shift():
+    stale_builder = ContextBuilder(system_prompt="sys")
+    compacted = Conversation()
+    compacted.add("user", "same", channel="discord", sender="alice")
+    compacted.add_assistant_with_tools(
+        None,
+        [ToolCall(id="new-call", name="send_message", arguments={"body": "new"})],
+    )
+    compacted.add_tool_result("new-call", "send_message", "OK new")
+    stale_rendered = stale_builder.build(compacted)
+
+    resumed = Conversation()
+    resumed.add("user", "same", channel="discord", sender="alice")
+    resumed.add_assistant_with_tools(
+        None,
+        [ToolCall(id="old-call", name="send_message", arguments={"body": "old"})],
+    )
+    resumed.add_tool_result("old-call", "send_message", "OK old")
+    resumed.replace_messages([*resumed.get_messages(), *compacted.get_messages()])
+
+    builder = ContextBuilder(system_prompt="sys")
+    assert (
+        builder.import_render_cache(
+            stale_rendered,
+            resumed.get_messages()[: len(stale_rendered)],
+        )
+        is False
+    )
+    assert builder.export_render_cache() == []
 
 
 def test_format_reminder_discord():

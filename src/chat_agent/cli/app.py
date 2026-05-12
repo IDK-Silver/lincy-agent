@@ -507,14 +507,20 @@ def main(user: str, resume: str | None = None) -> None:
         if cached is not None:
             conv_entries = conversation.get_messages()
             if len(cached) <= len(conv_entries):
-                builder.import_render_cache(
+                restored = builder.import_render_cache(
                     cached, list(conv_entries[: len(cached)])
                 )
                 if debug:
-                    console.print_debug(
-                        "render-cache",
-                        f"Restored {len(cached)} cached entries",
-                    )
+                    if restored:
+                        console.print_debug(
+                            "render-cache",
+                            f"Restored {len(cached)} cached entries",
+                        )
+                    else:
+                        console.print_debug(
+                            "render-cache",
+                            "Discarded stale render cache",
+                        )
     bm25_search_instance = BM25MemorySearch(
         memory_dir=agent_os_dir / "memory",
         config=config.tools.memory_search.bm25,

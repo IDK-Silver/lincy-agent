@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -148,15 +149,98 @@ class ContextBuilder:
         self,
         rendered: list[Message],
         sources: list[object],
-    ) -> None:
+    ) -> bool:
         """Restore a previously persisted render cache.
 
         *rendered* should come from disk; *sources* must be the live
         conversation entry objects at matching positions so that the
         ``is``-based identity check in ``build()`` works correctly.
         """
+        if not self._render_cache_matches_sources(rendered, sources):
+            self.clear_render_cache()
+            return False
         self._rendered_conv = list(rendered)
         self._rendered_conv_sources = list(sources)
+        return True
+
+    @classmethod
+    def _render_cache_matches_sources(
+        cls,
+        rendered: list[Message],
+        sources: list[object],
+    ) -> bool:
+        if len(rendered) != len(sources):
+            return False
+        return all(
+            cls._render_cache_entry_matches_source(cached, source)
+            for cached, source in zip(rendered, sources, strict=True)
+        )
+
+    @classmethod
+    def _render_cache_entry_matches_source(
+        cls,
+        rendered: Message,
+        source: object,
+    ) -> bool:
+        source_msg = getattr(source, "message", source)
+        if not isinstance(source_msg, Message):
+            return False
+        if rendered.role != source_msg.role:
+            return False
+        if rendered.name != source_msg.name:
+            return False
+        if rendered.tool_call_id != source_msg.tool_call_id:
+            return False
+        if cls._tool_call_signature(rendered.tool_calls) != cls._tool_call_signature(
+            source_msg.tool_calls,
+        ):
+            return False
+        return cls._rendered_content_matches_source(rendered, source_msg)
+
+    @staticmethod
+    def _tool_call_signature(tool_calls: list[ToolCall] | None) -> tuple[tuple[str, str, str], ...]:
+        return tuple(
+            (
+                tool_call.id,
+                tool_call.name,
+                json.dumps(
+                    tool_call.arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+            for tool_call in (tool_calls or [])
+        )
+
+    @classmethod
+    def _rendered_content_matches_source(
+        cls,
+        rendered: Message,
+        source: Message,
+    ) -> bool:
+        if source.content is None:
+            return rendered.content is None or not cls._content_text(rendered.content)
+
+        source_text = cls._content_text(source.content)
+        rendered_text = cls._content_text(rendered.content)
+        if source_text == rendered_text:
+            return True
+        if source.role in {"user", "assistant"} and source_text:
+            return source_text in rendered_text
+        return False
+
+    @staticmethod
+    def _content_text(content: str | list[ContentPart] | None) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                part.text or ""
+                for part in content
+                if isinstance(part, ContentPart) and part.type == "text"
+            )
+        return ""
 
     def boot_fingerprint(self) -> str:
         """Return a stable hash of the current boot content.

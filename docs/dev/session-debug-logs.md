@@ -33,6 +33,9 @@
   - 若本輪有 compact，另外會記 `compaction_source`、`compaction_trigger`、`compacted_messages_removed`、`compaction_fallback`
 - `checkpoints/latest.json`
   - 目前 conversation 的完整 snapshot
+- `checkpoints/render_cache.jsonl`
+  - 保存已渲染的 conversation prefix，讓 resume 後 prompt cache 前綴較穩定
+  - resume 時會比對目前 `messages.jsonl` 的對應訊息；若角色、tool call id/name/arguments、tool result id/name 或原文內容對不上，會丟棄這份 render cache，避免舊 cache 污染下一輪 prompt
 
 ## 邊界
 
