@@ -136,6 +136,75 @@ def test_tool_history_roundtrips_reasoning_content(monkeypatch):
     assert "reasoning_details" not in assistant
 
 
+def test_thinking_tool_history_emits_reasoning_content_field(monkeypatch):
+    calls: list[dict] = []
+    _patch_httpx_client(monkeypatch, make_openai_payload("ok"), calls)
+    client = DeepSeekClient(_thinking_config())
+    messages = [
+        Message(role="user", content="load a skill"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="skill_1",
+                    name="_load_skill_prerequisite",
+                    arguments={"skill_name": "discord-messaging"},
+                ),
+            ],
+        ),
+        Message(
+            role="tool",
+            content="loaded",
+            tool_call_id="skill_1",
+            name="_load_skill_prerequisite",
+        ),
+    ]
+
+    _ = client.chat(messages)
+
+    assistant = calls[0]["json"]["messages"][1]
+    assert assistant["reasoning_content"] == ""
+    assert "reasoning" not in assistant
+    assert "reasoning_details" not in assistant
+
+
+def test_disabled_tool_history_does_not_synthesize_reasoning_content(monkeypatch):
+    calls: list[dict] = []
+    _patch_httpx_client(monkeypatch, make_openai_payload("ok"), calls)
+    config = DeepSeekConfig(
+        model="deepseek-v4-flash",
+        api_key="test-key",
+        thinking=DeepSeekThinkingConfig(enabled=False),
+    ).validate_reasoning(source_path=Path("test.yaml"))
+    client = DeepSeekClient(config)
+    messages = [
+        Message(role="user", content="load a skill"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="skill_1",
+                    name="_load_skill_prerequisite",
+                    arguments={"skill_name": "discord-messaging"},
+                ),
+            ],
+        ),
+        Message(
+            role="tool",
+            content="loaded",
+            tool_call_id="skill_1",
+            name="_load_skill_prerequisite",
+        ),
+    ]
+
+    _ = client.chat(messages)
+
+    assistant = calls[0]["json"]["messages"][1]
+    assert "reasoning_content" not in assistant
+
+
 def test_chat_with_tools_parses_reasoning_and_cache_usage(monkeypatch):
     calls: list[dict] = []
     payload = {

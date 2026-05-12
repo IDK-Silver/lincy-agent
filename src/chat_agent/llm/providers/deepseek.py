@@ -70,11 +70,21 @@ class DeepSeekClient(OpenAICompatibleClient):
         rewritten: list[OpenAIMessagePayload] = []
         for msg in converted:
             updates: dict[str, Any] = {}
+            reasoning_content = msg.reasoning_content
             if msg.reasoning is not None:
-                updates["reasoning_content"] = msg.reasoning
+                reasoning_content = msg.reasoning
+                updates["reasoning_content"] = reasoning_content
                 updates["reasoning"] = None
             if msg.reasoning_details is not None:
                 updates["reasoning_details"] = None
+            if (
+                self.thinking_payload["type"] == "enabled"
+                and msg.role == "assistant"
+                and msg.tool_calls
+                and reasoning_content is None
+            ):
+                # DeepSeek requires the field when continuing from a tool result.
+                updates["reasoning_content"] = ""
             rewritten.append(msg.model_copy(update=updates) if updates else msg)
 
         if len(rewritten) < 2:

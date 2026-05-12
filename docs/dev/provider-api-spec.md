@@ -241,6 +241,7 @@
 | Thinking payload | enabled 時送 `thinking.type=enabled` 與 `reasoning_effort`；disabled 時只送 `thinking.type=disabled` | `src/chat_agent/llm/providers/deepseek.py` | disabled 不送 `reasoning_effort` |
 | Temperature 驗證 | thinking enabled 時若設定 `temperature` 則早停報錯 | `src/chat_agent/core/schema.py` | 避免 silent no-op |
 | Reasoning 回放 | assistant tool-call history 使用 `reasoning_content`，不使用 OpenAI-compatible base client 的 `reasoning` 欄位 | `src/chat_agent/llm/providers/deepseek.py` | 避免 DeepSeek thinking tool 回合 400 |
+| 合成 tool call 回放 | thinking enabled 時，assistant tool-call history 若沒有可回放的 `reasoning_content`，adapter 送空字串欄位 | `src/chat_agent/llm/providers/deepseek.py` | boot / pinned context / skill prerequisite 這類系統合成 tool call 沒有模型 reasoning；實測最後一則訊息為 tool result 時缺欄位會 400 |
 | Structured outputs | `response_schema` 目前不支援；client 早停報錯 | `src/chat_agent/llm/providers/deepseek.py` | DeepSeek JSON Output 不是本專案目前的 JSON Schema 介面 |
 | Cache metrics | `prompt_cache_hit_tokens` 映射為 `LLMResponse.cache_read_tokens`，`cache_write_tokens=0` | `src/chat_agent/llm/providers/deepseek.py` | DeepSeek 不回傳 write tokens |
 
@@ -250,6 +251,7 @@
 |------|------|---------|--------|------|
 | `deepseek-v4-flash` no-thinking | `thinking.type=disabled` + JSON Output 實際回 `200` | 本機實測 | 高 | 2026-05-12，回傳 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` |
 | `deepseek-v4-pro` thinking/max | `thinking.type=enabled` + `reasoning_effort=max` 實際回 `200` 且含 `reasoning_content` | 本機實測 | 高 | 2026-05-12 |
+| thinking tool-result continuation | request 最後一則為 tool result，且前一則 assistant tool call 缺 `reasoning_content` 時回 `400`；送 `reasoning_content: ""` 時回 `200` | lincy 實測 | 高 | 2026-05-12，錯誤訊息為 `The reasoning_content in the thinking mode must be passed back to the API.` |
 
 ---
 
