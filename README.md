@@ -91,11 +91,11 @@ uv run codex-proxy
 
 `cfgs/supervisor.yaml` 現在支援 `enabled: auto`。`copilot-proxy`、`codex-proxy`、`claude-code-proxy` 會依 `cfgs/agent.yaml` 裡實際使用的 provider 自動決定是否啟動。如果你想手動單獨測 Claude Code，也可以直接另外啟 `claude-code-proxy`，再把 `cfgs/agent.yaml` 裡對應 agent 的 `llm` 路徑切到：
 
-- `cfgs/llm/claude_code/claude-sonnet-4.6/no-thinking.yaml`
-- `cfgs/llm/claude_code/claude-sonnet-4.6/thinking.yaml`
+- `cfgs/llm/claude_code/claude-opus-4.7/no-thinking.yaml`
+- `cfgs/llm/claude_code/claude-opus-4.7/thinking.yaml`
 
-這兩個 profile 目前只保留 Claude Sonnet 4.6，並且已把輸出上限拉到高值：
-- `model: claude-sonnet-4-6`
+Claude Code profiles 放在 `cfgs/llm/claude_code/`。Opus 4.7 profile 使用：
+- `model: claude-opus-4-7`
 - `max_tokens: 128000`
 - `thinking.type: adaptive` + `output_config.effort: high`（thinking profile）
 - `thinking.type: disabled` + `output_config.effort: low`（no-thinking profile）
