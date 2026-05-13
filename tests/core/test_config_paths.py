@@ -117,16 +117,16 @@ def test_repo_agent_config_enables_shell_handoff_rules():
     ]
 
 
-def test_repo_agent_config_brain_uses_claude_opus_47_with_expected_fallbacks():
+def test_repo_agent_config_brain_uses_deepseek_v4_pro_with_expected_fallbacks():
     config = config_module.load_config("agent.yaml")
 
     brain_llm = config.agents["brain"].llm
-    assert brain_llm.provider == "claude_code"
-    assert brain_llm.model == "claude-opus-4-7"
+    assert brain_llm.provider == "deepseek"
+    assert brain_llm.model == "deepseek-v4-pro"
     assert brain_llm.thinking is not None
-    assert brain_llm.thinking.type == "adaptive"
-    assert brain_llm.output_config is not None
-    assert brain_llm.output_config.effort == "high"
+    assert brain_llm.thinking.enabled is True
+    assert brain_llm.thinking.effort == "max"
+    assert brain_llm.temperature is None
 
     fallbacks = config.agents["brain"].llm_fallbacks
     assert [cfg.provider for cfg in fallbacks] == ["codex", "ollama", "ollama"]
@@ -135,6 +135,17 @@ def test_repo_agent_config_brain_uses_claude_opus_47_with_expected_fallbacks():
         "qwen3.5:397b-cloud",
         "kimi-k2.6:cloud",
     ]
+
+
+def test_repo_agent_config_memory_editor_uses_codex_gpt55_low_thinking():
+    config = config_module.load_config("agent.yaml")
+
+    memory_editor_llm = config.agents["memory_editor"].llm
+    assert memory_editor_llm.provider == "codex"
+    assert memory_editor_llm.model == "gpt-5.5"
+    assert memory_editor_llm.reasoning is not None
+    assert memory_editor_llm.reasoning.enabled is True
+    assert memory_editor_llm.reasoning.effort == "low"
 
 
 def test_repo_kimi_k26_cloud_profile_loads():

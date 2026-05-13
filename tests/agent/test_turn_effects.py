@@ -175,16 +175,24 @@ class TestAnalyzeTurnEffects:
         assert effects.had_task_mutation is True
         assert effects.is_scheduled_noop is False
 
-    def test_agent_note_update_counts_as_mutation(self):
+    def test_agent_note_batch_update_counts_as_mutation(self):
         msgs = _build_turn(
             tool_calls=[
                 ToolCall(
                     id="c1",
                     name="agent_note",
-                    arguments={"action": "update", "key": "meeting_context"},
+                    arguments={
+                        "action": "batch_update",
+                        "updates": [{"key": "meeting_context", "value": "ready"}],
+                    },
                 )
             ],
-            results={"c1": "OK: updated note 'meeting_context'"},
+            results={
+                "c1": (
+                    "OK: batch updated 1/1 note(s). "
+                    "Results: meeting_context:changed"
+                )
+            },
         )
         effects = analyze_turn_effects(msgs, had_send_message=False)
         assert effects.had_note_mutation is True

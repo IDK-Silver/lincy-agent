@@ -46,6 +46,17 @@ from .ui_event_console import AgentUiPort
 
 logger = logging.getLogger(__name__)
 _PROACTIVE_SKILL_CHECK_MAX_SKILLS = 1
+_STATE_COMMIT_TOOLS = frozenset({"agent_note", "memory_edit"})
+
+
+def _state_commit_tool_repeat_warning(tool_name: str) -> str:
+    return (
+        f"Error: {tool_name} was already used successfully in this turn. "
+        "SERIOUS WARNING: batch all agent_note and memory_edit state commits "
+        "into one call per tool per turn. Do not create unnecessary API cost "
+        "by repeating state-only tool calls. Stop the tool loop now unless the "
+        "previous call failed."
+    )
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,47 @@ def _is_error_tool_result(result: object) -> bool:
 
     return isinstance(result, ToolResult) and result.is_error
 
+
+def _is_state_commit_tool_call(tool_call: ToolCall) -> bool:
+    """Return True when this call intends to mutate durable state."""
+    if tool_call.name == "memory_edit":
+        return True
+    if tool_call.name != "agent_note":
+        return False
+    action = tool_call.arguments.get("action")
+    return action in {"create", "batch_update", "remove"}
+
+
+def _is_successful_state_commit(tool_call: ToolCall, result: object) -> bool:
+    """Return True when a state commit tool should count against the turn."""
+    if not _is_state_commit_tool_call(tool_call):
+        return False
+    if _is_error_tool_result(result):
+        return False
+    content = getattr(result, "content", None)
+    if (
+        tool_call.name == "memory_edit"
+        and isinstance(content, str)
+        and is_failed_memory_edit_result(content)
+    ):
+        return False
+    return True
+
+
+class _StateCommitTurnTracker:
+    """Track per-turn state commit tools that already succeeded."""
+
+    def __init__(self) -> None:
+        self._successful_tools: set[str] = set()
+
+    def should_block(self, tool_call: ToolCall) -> bool:
+        if not _is_state_commit_tool_call(tool_call):
+            return False
+        return tool_call.name in self._successful_tools
+
+    def observe_result(self, tool_call: ToolCall, result: object) -> None:
+        if _is_successful_state_commit(tool_call, result):
+            self._successful_tools.add(tool_call.name)
 
 
 def _format_memory_edit_failure_summaries(summaries: list[str]) -> str:
@@ -485,6 +537,7 @@ def _run_responder(
     memory_edit_turn_fail_streak = 0
     preempt_count = 0
     iterations = 0
+    state_commit_tracker = _StateCommitTurnTracker()
     while response.has_tool_calls():
         iterations += 1
         if iterations > max_iterations:
@@ -509,6 +562,7 @@ def _run_responder(
         )
 
         failed_memory_edit_this_round = False
+        repeated_state_commit_this_round = False
         memory_edit_failure_summaries: list[str] = []
         tool_results_this_round: dict[str, object] = {}
         deferred_results = _maybe_defer_tool_round_for_skills(
@@ -546,7 +600,12 @@ def _run_responder(
         _is_safe = getattr(registry, "is_concurrency_safe", None)
         concurrent_calls = [
             tc for tc in response.tool_calls
-            if _is_safe and registry.has_tool(tc.name) and _is_safe(tc.name)
+            if (
+                tc.name not in _STATE_COMMIT_TOOLS
+                and _is_safe
+                and registry.has_tool(tc.name)
+                and _is_safe(tc.name)
+            )
         ]
         sequential_calls = [
             tc for tc in response.tool_calls
@@ -633,6 +692,27 @@ def _run_responder(
             if on_before_tool_call is not None:
                 on_before_tool_call(tool_call)
 
+            if state_commit_tracker.should_block(tool_call):
+                from ..tools.registry import ToolResult
+
+                repeated_state_commit_this_round = True
+                result = ToolResult(
+                    _state_commit_tool_repeat_warning(tool_call.name),
+                    is_error=True,
+                )
+                console.print_warning(
+                    f"{tool_call.name} was called more than once in this turn; "
+                    "stopping to avoid unnecessary API cost.",
+                )
+                console.print_tool_result(tool_call, result.content)
+                conversation.add_tool_result(
+                    tool_call.id,
+                    tool_call.name,
+                    result.content,
+                )
+                tool_results_this_round[tool_call.id] = result
+                continue
+
             shell_command = tool_call.arguments.get("command")
             skip_spinner = (
                 tool_call.name == "gui_task"
@@ -651,6 +731,7 @@ def _run_responder(
             console.print_tool_result(tool_call, result.content)
             conversation.add_tool_result(tool_call.id, tool_call.name, result.content)
             tool_results_this_round[tool_call.id] = result
+            state_commit_tracker.observe_result(tool_call, result)
             if turn_context is not None and turn_context.proactive_yield is not None:
                 scope_id = turn_context.proactive_yield.scope_id
                 raise ProactiveTurnYield(scope_id)
@@ -694,6 +775,11 @@ def _run_responder(
                 tr = tool_results_this_round.get(tc.id)
                 if tr is not None:
                     conversation.add_tool_result(tc.id, tc.name, tr.content)
+            response.content = None
+            response.tool_calls = []
+            return response
+
+        if repeated_state_commit_this_round:
             response.content = None
             response.tool_calls = []
             return response

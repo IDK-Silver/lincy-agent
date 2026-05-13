@@ -296,9 +296,11 @@ def make_heartbeat_message(
 | Action | 參數 | 說明 |
 |--------|------|------|
 | `create` | `key`, `value`, `triggers?`, `description?`, `source_app?`, `source_id?`, `source_label?` | 建立 note |
-| `update` | `key`, `value?`, `triggers?`, `description?`, `source_app?`, `source_id?`, `source_label?` | 更新值或 triggers |
+| `batch_update` | `updates[]`，每筆含 `key`, `value?`, `triggers?`, `description?`, `source_app?`, `source_id?`, `source_label?` | 更新既有 note；單筆更新也使用此 action |
 | `list` | — | 列出所有 notes（含 triggers） |
 | `remove` | `key` | 刪除 note |
+
+Runtime 規則：`agent_note` 寫入是狀態提交工具，同一 turn 最多成功呼叫一次；若同輪需要改一個或多個 note，都必須用 `batch_update`。`list` 是唯讀，不占提交額度。第二次成功後的重複寫入會被 responder 擋下並結束 tool loop，以避免無意義的 API 花費。
 
 ### Context 注入
 

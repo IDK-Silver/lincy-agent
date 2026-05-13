@@ -51,6 +51,10 @@ MEMORY_EDIT_DEFINITION = ToolDefinition(
         "Persist memory updates under memory/ using instruction requests. "
         "Required root keys: as_of, turn_id, requests. "
         "Each request must contain request_id, target_path, instruction. "
+        "Treat one memory_edit call as the whole turn's memory commit: batch "
+        "all memory changes into requests, even when there is only one target "
+        "file, and do not call memory_edit again in the same turn unless the "
+        "previous call failed. "
         "Index links are auto-managed: creating/deleting files automatically "
         "updates parent index.md. Only use index.md as target to update "
         "descriptions, not to add/remove links. "
@@ -70,7 +74,10 @@ MEMORY_EDIT_DEFINITION = ToolDefinition(
             type="array",
             description=(
                 "List of instruction requests (max 12). "
-                "Each request must include request_id, target_path, instruction."
+                "Each request must include request_id, target_path, instruction. "
+                "Batch all same-turn memory changes here instead of making "
+                "multiple memory_edit calls; single-file updates still use a "
+                "one-item requests array."
             ),
             json_schema={
                 "type": "array",
@@ -132,4 +139,3 @@ def create_memory_edit(
         return json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
 
     return memory_edit
-

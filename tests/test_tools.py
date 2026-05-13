@@ -8,8 +8,11 @@ import pytest
 from chat_agent.llm.schema import ToolCall, ToolDefinition, ToolParameter
 from chat_agent.tools import ToolRegistry, get_current_time
 from chat_agent.memory import MEMORY_EDIT_DEFINITION
+from chat_agent.agent.note_store import NoteStore
 from chat_agent.tools.builtin import (
+    AGENT_NOTE_DEFINITION,
     GET_CURRENT_TIME_DEFINITION,
+    create_agent_note,
     create_read_file,
     create_write_file,
     create_edit_file,
@@ -224,6 +227,57 @@ class TestToolDefinition:
         assert "instruction" in requests_schema["items"]["properties"]
         assert "target_path" in requests_schema["items"]["properties"]
 
+    def test_agent_note_schema_defines_batch_update_items(self):
+        schema = AGENT_NOTE_DEFINITION.to_json_schema()
+
+        assert "update" not in schema["properties"]["action"]["enum"]
+        assert "batch_update" in schema["properties"]["action"]["enum"]
+        updates_schema = schema["properties"]["updates"]
+        assert updates_schema["type"] == "array"
+        assert updates_schema["maxItems"] == 12
+        assert updates_schema["items"]["type"] == "object"
+        assert "key" in updates_schema["items"]["required"]
+
+    def test_agent_note_batch_update_changes_multiple_notes(self, tmp_path: Path):
+        note_store = NoteStore(tmp_path)
+        tool = create_agent_note(note_store)
+
+        assert tool(action="create", key="location", value="台北").startswith("OK:")
+        assert tool(action="create", key="mood", value="休息").startswith("OK:")
+
+        result = tool(
+            action="batch_update",
+            updates=[
+                {"key": "location", "value": "新竹"},
+                {"key": "mood", "value": "專注"},
+            ],
+        )
+
+        assert result.startswith("OK: batch updated 2/2")
+        assert note_store.get("location").value == "新竹"
+        assert note_store.get("mood").value == "專注"
+
+    def test_agent_note_batch_update_noop_warns_not_to_repeat(self, tmp_path: Path):
+        note_store = NoteStore(tmp_path)
+        tool = create_agent_note(note_store)
+
+        assert tool(action="create", key="mood", value="專注").startswith("OK:")
+        result = tool(
+            action="batch_update",
+            updates=[{"key": "mood", "value": "專注"}],
+        )
+
+        assert result.startswith("NOOP:")
+        assert "Do not call agent_note again" in result
+
+    def test_agent_note_update_action_is_removed(self, tmp_path: Path):
+        note_store = NoteStore(tmp_path)
+        tool = create_agent_note(note_store)
+
+        result = tool(action="update", key="mood", value="專注")
+
+        assert result == "Error: unknown action 'update'"
+
 
 class TestFileTools:
     def test_read_file_basic(self, tmp_path: Path):
@@ -248,7 +302,7 @@ class TestFileTools:
         read_file = create_read_file([], tmp_path)
         result = read_file(str(test_file), offset=2, limit=2)
 
-        assert f'lines="2-3" total_lines="5"' in result
+        assert 'lines="2-3" total_lines="5"' in result
         assert "line1" not in result
         assert "2\tline2" in result
         assert "3\tline3" in result

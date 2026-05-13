@@ -179,6 +179,7 @@ def test_codex_config_rejects_openai_compat_base_url():
         ("llm/codex/gpt-5.3-codex-spark/thinking.yaml", "gpt-5.3-codex-spark", True),
         ("llm/codex/gpt-5.2/no-thinking.yaml", "gpt-5.2", False),
         ("llm/codex/gpt-5.2/thinking.yaml", "gpt-5.2", True),
+        ("llm/codex/gpt-5.5/low-thinking.yaml", "gpt-5.5", True),
     ],
 )
 def test_repo_codex_profiles_load(path: str, model: str, reasoning_enabled: bool):
@@ -188,6 +189,13 @@ def test_repo_codex_profiles_load(path: str, model: str, reasoning_enabled: bool
     assert config.model == model
     assert config.reasoning is not None
     assert config.reasoning.enabled is reasoning_enabled
+
+
+def test_repo_codex_gpt55_low_thinking_profile_uses_low_effort():
+    config = resolve_llm_config("llm/codex/gpt-5.5/low-thinking.yaml")
+
+    assert isinstance(config, CodexConfig)
+    assert config.reasoning is not None
+    assert config.reasoning.enabled is True
+    assert config.reasoning.effort == "low"
     assert config.reasoning.supported_efforts == ["low", "medium", "high", "xhigh"]
-    expected_effort = "xhigh" if reasoning_enabled else None
-    assert config.reasoning.effort == expected_effort

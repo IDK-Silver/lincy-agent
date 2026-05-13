@@ -71,7 +71,10 @@ def analyze_turn_effects(
                         effects.had_task_mutation = True
             if tool_call.name == "agent_note":
                 action = tool_call.arguments.get("action")
-                if action in {"create", "update", "remove"} and result_msg is not None:
+                if (
+                    action in {"create", "batch_update", "remove"}
+                    and result_msg is not None
+                ):
                     if _is_ok_tool_result(result_msg):
                         effects.had_note_mutation = True
 

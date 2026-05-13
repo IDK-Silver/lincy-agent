@@ -162,6 +162,7 @@ from .m0151_notes_template_title_semantics import M0151NotesTemplateTitleSemanti
 from .m0152_notes_title_body_rules import M0152NotesTitleBodyRules
 from .m0153_self_improvement_prompt import M0153SelfImprovementPrompt
 from .m0154_mail_tool_prompt import M0154MailToolPrompt
+from .m0155_state_commit_tool_budget import M0155StateCommitToolBudget
 
 ALL_MIGRATIONS = [
     M0001Initial(),
@@ -316,4 +317,5 @@ ALL_MIGRATIONS = [
     M0152NotesTitleBodyRules(),
     M0153SelfImprovementPrompt(),
     M0154MailToolPrompt(),
+    M0155StateCommitToolBudget(),
 ]
