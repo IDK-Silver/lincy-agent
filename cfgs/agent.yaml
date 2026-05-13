@@ -17,13 +17,13 @@ app:
 tui:
   debug: true
   show_tool_use: true
-  replay_turns: null    # resume 時顯示最近 N 輪，null = 全部
+  replay_turns: null # resume 時顯示最近 N 輪，null = 全部
   show_tool_calls: true # resume 時是否顯示 tool call 細節
 
 # Context window management
 context:
-  soft_max_prompt_tokens: 240000
-  preserve_turns: 12
+  soft_max_prompt_tokens: 128000
+  preserve_turns: 4
   # Core rules: high attention weight, injected as system message
   boot_files:
     - "memory/agent/persona.md"
@@ -55,14 +55,14 @@ maintenance:
   archive:
     retain_days: 3
   context_refresh:
-    preserve_turns: 0
+    preserve_turns: 4
   backup:
     enabled: true
     interval_minutes: 300
     retention_minutes: 1440
   session_file_cleanup:
     enabled: true
-    retention_days: 3
+    retention_days: 90
 
 # Feature flags
 features:
@@ -79,9 +79,9 @@ features:
   codex_remote_compaction:
     enabled: true
   icloud_sync_awareness:
-    enabled: true
+    enabled: false
   send_message_batch_guidance:
-    enabled: true
+    enabled: false
   format_reminders:
     discord: false
     gmail: false
