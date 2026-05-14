@@ -43,7 +43,7 @@ agents:
 - **Runtime Gate**：若 `memory_search` 可用且對話中無先前 Stage 1 Findings，第一個工具呼叫必須是 `memory_search`，且 query 不可為空
 - 若對話中已有先前 findings（`_stage1_gather` tool result），gate 跳過，LLM 可判斷是否需要重新搜尋
 - 同一次 Stage 1 gather 內，若第二次 `memory_search` 回傳與先前完全相同的結果，runtime 會直接回錯，提示 refine query 或停止搜尋，避免重複消耗
-- 若 Stage 1 誤呼叫 forbidden action（如 `send_message`、`memory_edit`、`schedule_action(add/remove)`），runtime 會回傳明確錯誤，要求把該動作轉寫成 findings；並在 transcript 記一條 `stage1-intent` 後直接結束 gather，避免浪費後續迭代
+- 若 Stage 1 誤呼叫 forbidden action（如 `send_message`、`memory_edit`、`schedule_action(batch_add/batch_remove)`），runtime 會回傳明確錯誤，要求把該動作轉寫成 findings；並在 transcript 記一條 `stage1-intent` 後直接結束 gather，避免浪費後續迭代
 - 最大迭代數由 `gather_max_iterations` 控制
 
 此階段結果：

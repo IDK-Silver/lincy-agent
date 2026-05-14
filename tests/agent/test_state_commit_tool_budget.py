@@ -225,3 +225,188 @@ def test_failed_memory_edit_does_not_consume_retry_budget():
     assert client.calls == 3
     assert executed == 2
     assert response.content == "done"
+
+
+def test_repeated_schedule_action_write_stops_same_turn():
+    registry = ToolRegistry()
+    executed: list[str] = []
+
+    def _schedule_action(**kwargs):
+        executed.append(kwargs["action"])
+        return "OK: scheduled 1 action(s)\n- 2030-01-01 00:00 (1.0h from now): x"
+
+    _register_tool(registry, "schedule_action", _schedule_action)
+    conversation = Conversation()
+    client = _Client([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    name="schedule_action",
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [
+                            {
+                                "reason": "x",
+                                "trigger_spec": "2030-01-01T00:00",
+                            }
+                        ],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t2",
+                    name="schedule_action",
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [
+                            {
+                                "reason": "y",
+                                "trigger_spec": "2030-01-01T01:00",
+                            }
+                        ],
+                    },
+                )
+            ],
+        ),
+    ])
+
+    response = _run_responder(
+        client=client,
+        messages=_messages(),
+        tools=[],
+        conversation=conversation,
+        builder=_Builder(),
+        registry=registry,
+        console=_console(),
+        max_iterations=5,
+    )
+
+    assert client.calls == 2
+    assert executed == ["batch_add"]
+    assert response.tool_calls == []
+    tool_results = [
+        msg for msg in conversation.get_messages()
+        if msg.role == "tool" and msg.name == "schedule_action"
+    ]
+    assert len(tool_results) == 2
+    assert "SERIOUS WARNING" in (tool_results[-1].content or "")
+    assert "batch_add" in (tool_results[-1].content or "")
+
+
+def test_schedule_action_list_does_not_consume_state_commit_budget():
+    registry = ToolRegistry()
+    executed: list[str] = []
+
+    def _schedule_action(**kwargs):
+        executed.append(kwargs["action"])
+        if kwargs["action"] == "list":
+            return "No pending scheduled actions."
+        return "OK: scheduled 1 action(s)\n- 2030-01-01 00:00 (1.0h from now): x"
+
+    _register_tool(registry, "schedule_action", _schedule_action)
+    client = _Client([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id="t1", name="schedule_action", arguments={"action": "list"})
+            ],
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t2",
+                    name="schedule_action",
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [
+                            {
+                                "reason": "x",
+                                "trigger_spec": "2030-01-01T00:00",
+                            }
+                        ],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(content="done", tool_calls=[]),
+    ])
+
+    response = _run_responder(
+        client=client,
+        messages=_messages(),
+        tools=[],
+        conversation=Conversation(),
+        builder=_Builder(),
+        registry=registry,
+        console=_console(),
+        max_iterations=5,
+    )
+
+    assert client.calls == 3
+    assert executed == ["list", "batch_add"]
+    assert response.content == "done"
+
+
+def test_failed_schedule_action_does_not_consume_retry_budget():
+    registry = ToolRegistry()
+    executed = 0
+
+    def _schedule_action(**kwargs):
+        nonlocal executed
+        del kwargs
+        executed += 1
+        if executed == 1:
+            return "Error: invalid datetime format: 'bad'"
+        return "OK: scheduled 1 action(s)\n- 2030-01-01 00:00 (1.0h from now): x"
+
+    _register_tool(registry, "schedule_action", _schedule_action)
+    client = _Client([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    name="schedule_action",
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [{"reason": "x", "trigger_spec": "bad"}],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(
+                    id="t2",
+                    name="schedule_action",
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [
+                            {
+                                "reason": "x",
+                                "trigger_spec": "2030-01-01T00:00",
+                            }
+                        ],
+                    },
+                )
+            ],
+        ),
+        LLMResponse(content="done", tool_calls=[]),
+    ])
+
+    response = _run_responder(
+        client=client,
+        messages=_messages(),
+        tools=[],
+        conversation=Conversation(),
+        builder=_Builder(),
+        registry=registry,
+        console=_console(),
+        max_iterations=5,
+    )
+
+    assert client.calls == 3
+    assert executed == 2
+    assert response.content == "done"

@@ -52,7 +52,7 @@ def analyze_turn_effects(
             result_msg = result_by_call_id.get(tool_call.id)
             if tool_call.name == "schedule_action":
                 action = tool_call.arguments.get("action")
-                if action not in {"add", "remove"}:
+                if action not in {"batch_add", "batch_remove"}:
                     continue
                 if result_msg is None:
                     continue

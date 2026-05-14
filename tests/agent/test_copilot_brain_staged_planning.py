@@ -548,7 +548,15 @@ def test_stage1_schedule_action_is_list_only():
                         ToolCall(
                             id="s1",
                             name="schedule_action",
-                            arguments={"action": "add", "reason": "x", "trigger_spec": "2030-01-01T00:00"},
+                            arguments={
+                                "action": "batch_add",
+                                "adds": [
+                                    {
+                                        "reason": "x",
+                                        "trigger_spec": "2030-01-01T00:00",
+                                    }
+                                ],
+                            },
                         )
                     ],
                 )

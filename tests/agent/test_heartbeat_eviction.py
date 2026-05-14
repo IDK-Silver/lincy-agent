@@ -296,8 +296,8 @@ class TestScheduledNoopEviction:
 
         assert len(conv.get_messages()) == 0
 
-    def test_scheduled_list_plus_add_preserved(self, tmp_path):
-        """list + successful add advances schedule state, so keep the turn."""
+    def test_scheduled_list_plus_batch_add_preserved(self, tmp_path):
+        """list + successful batch_add advances schedule state, so keep the turn."""
         core, q, conv, tc = _make_core(tmp_path)
 
         def fake_turn(content, **kwargs):
@@ -307,9 +307,13 @@ class TestScheduledNoopEviction:
                 id="tc_add",
                 name="schedule_action",
                 arguments={
-                    "action": "add",
-                    "reason": "take medicine",
-                    "trigger_spec": "2026-02-23T23:00",
+                    "action": "batch_add",
+                    "adds": [
+                        {
+                            "reason": "take medicine",
+                            "trigger_spec": "2026-02-23T23:00",
+                        }
+                    ],
                 },
             )
             _add_tool_round(
@@ -317,7 +321,10 @@ class TestScheduledNoopEviction:
                 tool_calls=[tc_list, tc_add],
                 results={
                     "tc_list": "No pending scheduled actions.",
-                    "tc_add": "OK: scheduled at 2026-02-23 23:00 (1.0h from now)",
+                    "tc_add": (
+                        "OK: scheduled 1 action(s)\n"
+                        "- 2026-02-23 23:00 (1.0h from now): take medicine"
+                    ),
                 },
             )
             return "completed"
@@ -384,8 +391,8 @@ class TestDiscordReviewNoopEviction:
 
         assert len(conv.get_messages()) == 2
 
-    def test_scheduled_add_failure_evicted(self, tmp_path):
-        """Failed schedule add has no durable effect and should be evicted."""
+    def test_scheduled_batch_add_failure_evicted(self, tmp_path):
+        """Failed schedule batch_add has no durable effect and should be evicted."""
         core, q, conv, tc = _make_core(tmp_path)
 
         def fake_turn(content, **kwargs):
@@ -393,7 +400,10 @@ class TestDiscordReviewNoopEviction:
             tc_add = ToolCall(
                 id="tc_add",
                 name="schedule_action",
-                arguments={"action": "add", "reason": "x", "trigger_spec": "bad"},
+                arguments={
+                    "action": "batch_add",
+                    "adds": [{"reason": "x", "trigger_spec": "bad"}],
+                },
             )
             _add_tool_round(
                 conv,

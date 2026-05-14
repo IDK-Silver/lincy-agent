@@ -357,7 +357,15 @@ class TestDebugArtifacts:
                     ToolCall(
                         id="tool_1",
                         name="schedule_action",
-                        arguments={"action": "add"},
+                        arguments={
+                            "action": "batch_add",
+                            "adds": [
+                                {
+                                    "reason": "plan later",
+                                    "trigger_spec": "2030-01-01T00:00",
+                                }
+                            ],
+                        },
                     )
                 ],
                 finish_reason="tool_use",

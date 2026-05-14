@@ -2,8 +2,6 @@
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from chat_agent.agent.queue import PersistentPriorityQueue
 from chat_agent.agent.adapters.scheduler import make_heartbeat_message
 from chat_agent.agent.schema import InboundMessage
@@ -35,81 +33,155 @@ class TestDefinition:
 
     def test_action_enum(self):
         assert SCHEDULE_ACTION_DEFINITION.parameters["action"].enum == [
-            "add",
+            "batch_add",
             "list",
-            "remove",
+            "batch_remove",
         ]
 
+    def test_single_item_parameters_are_removed(self):
+        assert "reason" not in SCHEDULE_ACTION_DEFINITION.parameters
+        assert "trigger_spec" not in SCHEDULE_ACTION_DEFINITION.parameters
+        assert "pending_id" not in SCHEDULE_ACTION_DEFINITION.parameters
+        assert "adds" in SCHEDULE_ACTION_DEFINITION.parameters
+        assert "pending_ids" in SCHEDULE_ACTION_DEFINITION.parameters
+
 
 # ------------------------------------------------------------------
-# Add
+# Batch add
 # ------------------------------------------------------------------
 
 
-class TestAdd:
+class TestBatchAdd:
     def test_success(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", reason="test reminder", trigger_spec=_future_local())
+        result = fn(
+            action="batch_add",
+            adds=[{"reason": "test reminder", "trigger_spec": _future_local()}],
+        )
         assert "OK" in result
+        assert "scheduled 1 action" in result
         items = q.scan_pending(channel="system")
         assert len(items) == 1
         assert "[SCHEDULED]" in items[0][1].content
         assert "test reminder" in items[0][1].content
         assert items[0][1].priority == 2
 
+    def test_multiple_success(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        result = fn(
+            action="batch_add",
+            adds=[
+                {"reason": "first", "trigger_spec": _future_local(1)},
+                {"reason": "second", "trigger_spec": _future_local(2)},
+            ],
+        )
+        assert "OK" in result
+        assert "scheduled 2 action" in result
+        assert len(q.scan_pending(channel="system")) == 2
+
     def test_not_before_is_set(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="test", trigger_spec=_future_local(hours=2))
+        fn(
+            action="batch_add",
+            adds=[{"reason": "test", "trigger_spec": _future_local(hours=2)}],
+        )
         items = q.scan_pending(channel="system")
         assert items[0][1].not_before is not None
 
     def test_goes_to_delayed_pool(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="test", trigger_spec=_future_local(hours=2))
+        fn(
+            action="batch_add",
+            adds=[{"reason": "test", "trigger_spec": _future_local(hours=2)}],
+        )
         assert q.pending_count() == 0  # Not in mem queue
         with q._delayed_lock:
             assert len(q._delayed) == 1
 
+    def test_missing_adds(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        result = fn(action="batch_add")
+        assert "Error" in result
+        assert "adds" in result
+
     def test_missing_reason(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", trigger_spec=_future_local())
+        result = fn(
+            action="batch_add",
+            adds=[{"trigger_spec": _future_local()}],
+        )
         assert "Error" in result
 
     def test_missing_trigger_spec(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", reason="test")
+        result = fn(
+            action="batch_add",
+            adds=[{"reason": "test"}],
+        )
         assert "Error" in result
 
     def test_past_trigger_spec(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", reason="test", trigger_spec="2020-01-01T09:00")
+        result = fn(
+            action="batch_add",
+            adds=[{"reason": "test", "trigger_spec": "2020-01-01T09:00"}],
+        )
         assert "Error" in result
         assert "future" in result
 
     def test_invalid_trigger_spec_format(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", reason="test", trigger_spec="not-a-date")
+        result = fn(
+            action="batch_add",
+            adds=[{"reason": "test", "trigger_spec": "not-a-date"}],
+        )
         assert "Error" in result
+
+    def test_invalid_batch_is_atomic(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        result = fn(
+            action="batch_add",
+            adds=[
+                {"reason": "valid", "trigger_spec": _future_local(1)},
+                {"reason": "bad", "trigger_spec": "not-a-date"},
+            ],
+        )
+        assert "Error" in result
+        assert len(q.scan_pending(channel="system")) == 0
 
     def test_no_system_flag_in_metadata(self, tmp_path):
         """Agent-scheduled messages should NOT have system=True."""
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="test", trigger_spec=_future_local())
+        fn(
+            action="batch_add",
+            adds=[{"reason": "test", "trigger_spec": _future_local()}],
+        )
         items = q.scan_pending(channel="system")
         assert "system" not in items[0][1].metadata
 
     def test_supports_utc_offset_timezone_string(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="add", reason="offset tz", trigger_spec=_future_local(1, "UTC+8"))
+        result = fn(
+            action="batch_add",
+            adds=[
+                {
+                    "reason": "offset tz",
+                    "trigger_spec": _future_local(1, "UTC+8"),
+                }
+            ],
+        )
         assert "OK" in result
 
     def test_aware_trigger_spec_normalised_to_app_tz(self, tmp_path):
@@ -117,9 +189,12 @@ class TestAdd:
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
         # Build a future UTC datetime string
-        future_utc = (datetime.now(timezone.utc) + timedelta(hours=2))
+        future_utc = datetime.now(timezone.utc) + timedelta(hours=2)
         trigger = future_utc.isoformat()
-        result = fn(action="add", reason="utc test", trigger_spec=trigger)
+        result = fn(
+            action="batch_add",
+            adds=[{"reason": "utc test", "trigger_spec": trigger}],
+        )
         assert "OK" in result
         items = q.scan_pending(channel="system")
         msg = items[0][1]
@@ -135,7 +210,10 @@ class TestAdd:
     def test_direct_inbound_beats_scheduled_priority(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="test reminder", trigger_spec=_future_local())
+        fn(
+            action="batch_add",
+            adds=[{"reason": "test reminder", "trigger_spec": _future_local()}],
+        )
         q.put(
             InboundMessage(
                 channel="discord",
@@ -167,7 +245,10 @@ class TestList:
     def test_shows_scheduled(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="meeting reminder", trigger_spec=_future_local())
+        fn(
+            action="batch_add",
+            adds=[{"reason": "meeting reminder", "trigger_spec": _future_local()}],
+        )
         result = fn(action="list")
         assert "SCHEDULED" in result
 
@@ -184,8 +265,13 @@ class TestList:
     def test_multiple_items(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="first", trigger_spec=_future_local(1))
-        fn(action="add", reason="second", trigger_spec=_future_local(2))
+        fn(
+            action="batch_add",
+            adds=[
+                {"reason": "first", "trigger_spec": _future_local(1)},
+                {"reason": "second", "trigger_spec": _future_local(2)},
+            ],
+        )
         result = fn(action="list")
         lines = result.strip().split("\n")
         assert len(lines) == 2
@@ -196,17 +282,37 @@ class TestList:
 # ------------------------------------------------------------------
 
 
-class TestRemove:
+class TestBatchRemove:
     def test_remove_agent_scheduled(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        fn(action="add", reason="removeme", trigger_spec=_future_local(2))
+        fn(
+            action="batch_add",
+            adds=[{"reason": "removeme", "trigger_spec": _future_local(2)}],
+        )
         items = q.scan_pending(channel="system")
         assert len(items) == 1
         pending_id = items[0][0].name
 
-        result = fn(action="remove", pending_id=pending_id)
+        result = fn(action="batch_remove", pending_ids=[pending_id])
         assert "OK" in result
+        assert len(q.scan_pending(channel="system")) == 0
+
+    def test_remove_multiple_agent_scheduled(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        fn(
+            action="batch_add",
+            adds=[
+                {"reason": "first", "trigger_spec": _future_local(1)},
+                {"reason": "second", "trigger_spec": _future_local(2)},
+            ],
+        )
+        pending_ids = [item[0].name for item in q.scan_pending(channel="system")]
+
+        result = fn(action="batch_remove", pending_ids=pending_ids)
+        assert "OK" in result
+        assert "removed 2 pending action" in result
         assert len(q.scan_pending(channel="system")) == 0
 
     def test_remove_system_heartbeat_blocked(self, tmp_path):
@@ -219,7 +325,7 @@ class TestRemove:
         pending_id = items[0][0].name
 
         fn = create_schedule_action(q)
-        result = fn(action="remove", pending_id=pending_id)
+        result = fn(action="batch_remove", pending_ids=[pending_id])
         assert "Error" in result
         assert "system" in result
         # Message should still be there
@@ -228,14 +334,31 @@ class TestRemove:
     def test_remove_not_found(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="remove", pending_id="nonexistent.json")
+        result = fn(action="batch_remove", pending_ids=["nonexistent.json"])
         assert "Error" in result
 
-    def test_remove_missing_pending_id(self, tmp_path):
+    def test_remove_missing_pending_ids(self, tmp_path):
         q = PersistentPriorityQueue(tmp_path / "q")
         fn = create_schedule_action(q)
-        result = fn(action="remove")
+        result = fn(action="batch_remove")
         assert "Error" in result
+
+    def test_remove_batch_is_atomic_when_system_item_present(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        fn(
+            action="batch_add",
+            adds=[{"reason": "removeme", "trigger_spec": _future_local(2)}],
+        )
+        hb = make_heartbeat_message(
+            not_before=tz_now() + timedelta(hours=2),
+        )
+        q.put(hb)
+        pending_ids = [item[0].name for item in q.scan_pending(channel="system")]
+
+        result = fn(action="batch_remove", pending_ids=pending_ids)
+        assert "Error" in result
+        assert len(q.scan_pending(channel="system")) == 2
 
 
 # ------------------------------------------------------------------
@@ -249,3 +372,17 @@ class TestUnknownAction:
         fn = create_schedule_action(q)
         result = fn(action="invalid")
         assert "Error" in result
+
+    def test_legacy_add_is_removed(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        result = fn(action="add")
+        assert "Error" in result
+        assert "unknown action" in result
+
+    def test_legacy_remove_argument_is_rejected(self, tmp_path):
+        q = PersistentPriorityQueue(tmp_path / "q")
+        fn = create_schedule_action(q)
+        result = fn(action="batch_remove", pending_id="x.json")
+        assert "Error" in result
+        assert "unexpected keys" in result

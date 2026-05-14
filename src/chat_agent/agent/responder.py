@@ -46,16 +46,17 @@ from .ui_event_console import AgentUiPort
 
 logger = logging.getLogger(__name__)
 _PROACTIVE_SKILL_CHECK_MAX_SKILLS = 1
-_STATE_COMMIT_TOOLS = frozenset({"agent_note", "memory_edit"})
+_STATE_COMMIT_TOOLS = frozenset({"agent_note", "memory_edit", "schedule_action"})
 
 
 def _state_commit_tool_repeat_warning(tool_name: str) -> str:
     return (
         f"Error: {tool_name} was already used successfully in this turn. "
-        "SERIOUS WARNING: batch all agent_note and memory_edit state commits "
-        "into one call per tool per turn. Do not create unnecessary API cost "
-        "by repeating state-only tool calls. Stop the tool loop now unless the "
-        "previous call failed."
+        "SERIOUS WARNING: batch all agent_note, memory_edit, and schedule_action "
+        "state commits into one call per tool per turn. Do not create unnecessary "
+        "API cost by repeating state-only tool calls. list actions are read-only; "
+        "mutating calls must use batch_update/requests/batch_add/batch_remove. "
+        "Stop the tool loop now unless the previous call failed."
     )
 
 
@@ -80,6 +81,9 @@ def _is_state_commit_tool_call(tool_call: ToolCall) -> bool:
     """Return True when this call intends to mutate durable state."""
     if tool_call.name == "memory_edit":
         return True
+    if tool_call.name == "schedule_action":
+        action = tool_call.arguments.get("action")
+        return action in {"batch_add", "batch_remove"}
     if tool_call.name != "agent_note":
         return False
     action = tool_call.arguments.get("action")
@@ -93,6 +97,8 @@ def _is_successful_state_commit(tool_call: ToolCall, result: object) -> bool:
     if _is_error_tool_result(result):
         return False
     content = getattr(result, "content", None)
+    if isinstance(content, str) and content.lstrip().startswith("Error:"):
+        return False
     if (
         tool_call.name == "memory_edit"
         and isinstance(content, str)

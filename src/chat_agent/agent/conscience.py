@@ -133,8 +133,14 @@ def _summarize_tool_call(tc: ToolCall) -> str:
         return f"memory_edit(targets={targets})"
     if tc.name == "schedule_action":
         action = args.get("action", "?")
-        reason = args.get("reason", "")
-        return f"schedule_action(action={action}, reason={reason[:50]})"
+        if action == "batch_add":
+            adds = args.get("adds", [])
+            reasons = [r.get("reason", "?") for r in adds if isinstance(r, dict)]
+            return f"schedule_action(action={action}, reasons={reasons[:3]})"
+        if action == "batch_remove":
+            pending_ids = args.get("pending_ids", [])
+            return f"schedule_action(action={action}, pending_ids={pending_ids})"
+        return f"schedule_action(action={action})"
     if tc.name == "agent_task":
         action = args.get("action", "?")
         title = args.get("title", "")

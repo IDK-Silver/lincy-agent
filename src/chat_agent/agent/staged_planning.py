@@ -80,7 +80,7 @@ _STAGE2_PLAN_PROMPT_TEMPLATE = (
     "- If one turn contains both durable rules and short-term context, split them into the appropriate files instead of merging into one note.\n"
     "- If no file updates needed, explicitly `none`.\n"
     "[SCHEDULE_PLAN]\n"
-    "- Whether to adjust schedule (add/remove/list) and why.\n"
+    "- Whether to adjust schedule (batch_add/batch_remove/list) and why.\n"
     "[EXECUTION_RULES]\n"
     "- Constraints and guardrails for Stage 3 execution.\n"
     "- Preserve the resolved timeline from above; never revive an earlier fact that was invalidated by a later correction.\n"

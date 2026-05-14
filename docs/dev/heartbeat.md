@@ -111,9 +111,11 @@ Agent 透過此 tool 排程未來的喚醒：
 
 | action | 參數 | 說明 |
 |--------|------|------|
-| `add` | `reason`, `trigger_spec` | 建立排程（`trigger_spec` 為本地時間 ISO datetime；本地時間 = `agent.yaml` 的 `timezone` 設定） |
+| `batch_add` | `adds=[{"reason","trigger_spec"}]` | 建立一個或多個排程；單筆也放進 `adds`（`trigger_spec` 為本地時間 ISO datetime；本地時間 = `agent.yaml` 的 `timezone` 設定） |
 | `list` | - | 列出所有待處理的系統訊息 |
-| `remove` | `pending_id` | 刪除排程（系統心跳不可刪） |
+| `batch_remove` | `pending_ids=[...]` | 刪除一個或多個排程；單筆也放進 `pending_ids`（系統心跳不可刪） |
+
+寫入動作是 batch-only：同一 turn 中 `batch_add` / `batch_remove` 最多只能成功呼叫一次；只有失敗時才重試。`list` 是唯讀，不算提交。
 
 Agent 排程的訊息 `priority=2`，真人 direct channel inbound（如 Discord / Gmail）通常為 `priority=1`，系統心跳 `priority=5`。
 
@@ -121,7 +123,6 @@ Agent 排程的訊息 `priority=2`，真人 direct channel inbound（如 Discord
 - 真人剛傳來的訊息，應先於 agent 先前排好的主動提醒處理
 - `schedule_action` 仍高於 background heartbeat，但不再壓過最新的人類輸入
 
-> Humanized Follow-up Policy V1（Prompt-first）目前只調整 prompt 與策略規則，**不修改** `schedule_action` API。
 > 目前沒有工具層 jitter 參數；軟性追蹤時間自然度先由 prompt 規則與範例引導。
 
 ## Proactive Send Yield（主動訊息讓路）
@@ -244,12 +245,12 @@ blocked state 下的原則：
 
 **保留條件**（任一成立就保留）：
 1. 有 `send_message`（對外輸出）
-2. `schedule_action add/remove` 成功（排程狀態變更）
+2. `schedule_action batch_add/batch_remove` 成功（排程狀態變更）
 3. `memory_edit` 結果中至少一個 `applied[].status == "applied"`（實際記憶寫入）
 
 **視為 no-op（可清除）範例**：
 - 只有 `schedule_action list`
-- `schedule_action add/remove` 失敗
+- `schedule_action batch_add/batch_remove` 失敗
 - `memory_edit` 全部為 `noop` / `already_applied`
 
 **注意**：

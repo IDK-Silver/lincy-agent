@@ -11,7 +11,7 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ...llm.schema import ToolDefinition, ToolParameter
 from ...timezone_utils import get_tz, now as tz_now
@@ -30,39 +30,62 @@ _SCHEDULED_TEMPLATE = (
     "Act on this reason. Use send_message to deliver messages."
 )
 
+_SCHEDULE_ADD_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {
+            "type": "string",
+            "description": "Why this wake-up is needed.",
+        },
+        "trigger_spec": {
+            "type": "string",
+            "description": "Local ISO datetime, e.g. '2026-02-22T09:00'.",
+        },
+    },
+    "required": ["reason", "trigger_spec"],
+    "additionalProperties": False,
+}
+
 SCHEDULE_ACTION_DEFINITION = ToolDefinition(
     name="schedule_action",
     description=(
-        "Schedule a future wake-up turn. Use 'add' to create a reminder, "
-        "'list' to see pending scheduled actions, 'remove' to cancel one. "
-        "System heartbeats cannot be removed."
+        "Schedule future wake-up turns. Use 'batch_add' to create one or more "
+        "reminders in one call, 'list' to see pending scheduled actions, and "
+        "'batch_remove' to cancel one or more pending actions in one call. "
+        "Mutating actions are batch-only and should be called at most once per "
+        "turn unless the previous call failed. System heartbeats cannot be removed."
     ),
     parameters={
         "action": ToolParameter(
             type="string",
-            description="Action to perform: 'add', 'list', or 'remove'.",
-            enum=["add", "list", "remove"],
+            description="Action to perform: 'batch_add', 'list', or 'batch_remove'.",
+            enum=["batch_add", "list", "batch_remove"],
         ),
-        "reason": ToolParameter(
-            type="string",
+        "adds": ToolParameter(
+            type="array",
             description=(
-                "Why this wake-up is needed (add only). "
-                "This text will appear in the [SCHEDULED] message."
+                "Schedule items for action='batch_add' (max 12). "
+                "Use a one-item array even for a single reminder."
             ),
+            json_schema={
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": _SCHEDULE_ADD_ITEM_SCHEMA,
+            },
         ),
-        "trigger_spec": ToolParameter(
-            type="string",
+        "pending_ids": ToolParameter(
+            type="array",
             description=(
-                "When to trigger (add only). "
-                "ISO datetime in local time, e.g. '2026-02-22T09:00'."
+                "Pending filenames to remove for action='batch_remove' (max 12). "
+                "Get these from the 'list' action."
             ),
-        ),
-        "pending_id": ToolParameter(
-            type="string",
-            description=(
-                "Filename of the pending message to remove (remove only). "
-                "Get this from the 'list' action."
-            ),
+            json_schema={
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": {"type": "string"},
+            },
         ),
     },
     required=["action"],
@@ -80,23 +103,68 @@ def create_schedule_action(
 
     def schedule_action(
         action: str,
-        reason: str | None = None,
-        trigger_spec: str | None = None,
-        pending_id: str | None = None,
+        adds: list[dict[str, Any]] | str | None = None,
+        pending_ids: list[str] | str | None = None,
+        **kwargs: Any,
     ) -> str:
-        if action == "add":
-            return _handle_add(reason, trigger_spec)
+        if kwargs:
+            extras = ", ".join(sorted(kwargs.keys()))
+            return (
+                "Error: Invalid schedule_action arguments: "
+                f"unexpected keys: {extras}"
+            )
+        if action == "batch_add":
+            if pending_ids is not None:
+                return "Error: 'pending_ids' is only valid for batch_remove"
+            return _handle_batch_add(adds)
         if action == "list":
+            if adds is not None or pending_ids is not None:
+                return "Error: 'list' does not accept adds or pending_ids"
             return _handle_list()
-        if action == "remove":
-            return _handle_remove(pending_id)
+        if action == "batch_remove":
+            if adds is not None:
+                return "Error: 'adds' is only valid for batch_add"
+            return _handle_batch_remove(pending_ids)
         return f"Error: unknown action '{action}'"
 
-    def _handle_add(reason: str | None, trigger_spec: str | None) -> str:
+    def _handle_batch_add(adds: list[dict[str, Any]] | str | None) -> str:
+        normalized = _normalize_adds(adds)
+        if isinstance(normalized, str):
+            return normalized
+
+        validation_error = _validate_adds(normalized)
+        if validation_error:
+            return validation_error
+
+        prepared: list[tuple[str, datetime, str, float, InboundMessage]] = []
+        now = tz_now()
+        for item in normalized:
+            reason = str(item["reason"])
+            trigger_spec = str(item["trigger_spec"])
+            parsed = _prepare_add(reason, trigger_spec, now=now)
+            if isinstance(parsed, str):
+                return parsed
+            prepared.append(parsed)
+
+        for reason, _local_dt, display_time, _hours, msg in prepared:
+            queue.put(msg)
+            logger.info("Scheduled action: %s at %s", reason, display_time)
+
+        lines = [f"OK: scheduled {len(prepared)} action(s)"]
+        for reason, _local_dt, display_time, hours, _msg in prepared:
+            lines.append(f"- {display_time} ({hours:.1f}h from now): {reason}")
+        return "\n".join(lines)
+
+    def _prepare_add(
+        reason: str | None,
+        trigger_spec: str | None,
+        *,
+        now: datetime,
+    ) -> tuple[str, datetime, str, float, InboundMessage] | str:
         if not reason:
-            return "Error: 'reason' is required for add"
+            return "Error: 'reason' is required for batch_add"
         if not trigger_spec:
-            return "Error: 'trigger_spec' is required for add"
+            return "Error: 'trigger_spec' is required for batch_add"
 
         try:
             local_dt = datetime.fromisoformat(trigger_spec)
@@ -108,7 +176,6 @@ def create_schedule_action(
             local_dt = local_dt.replace(tzinfo=tz)
         local_dt = local_dt.astimezone(tz)
 
-        now = tz_now()
         if local_dt <= now:
             return "Error: trigger_spec must be in the future"
 
@@ -126,11 +193,9 @@ def create_schedule_action(
             timestamp=local_dt,
             not_before=local_dt,
         )
-        queue.put(msg)
         delta = local_dt - now
         hours = delta.total_seconds() / 3600
-        logger.info("Scheduled action: %s at %s", reason, display_time)
-        return f"OK: scheduled at {display_time} ({hours:.1f}h from now)"
+        return reason, local_dt, display_time, hours, msg
 
     def _handle_list() -> str:
         items = queue.scan_pending(channel="system")
@@ -150,24 +215,104 @@ def create_schedule_action(
             lines.append(f"- {filepath.name}{tag} (at {nb_str}): {preview}")
         return "\n".join(lines)
 
-    def _handle_remove(pending_id: str | None) -> str:
-        if not pending_id:
-            return "Error: 'pending_id' is required for remove"
+    def _handle_batch_remove(pending_ids: list[str] | str | None) -> str:
+        normalized = _normalize_pending_ids(pending_ids)
+        if isinstance(normalized, str):
+            return normalized
 
-        filepath = queue._pending_dir / pending_id
-        if not filepath.exists():
-            return f"Error: pending message not found: {pending_id}"
+        validation_error = _validate_pending_ids(normalized)
+        if validation_error:
+            return validation_error
 
-        # Check if it's a system heartbeat
-        try:
-            data = json.loads(filepath.read_text())
-            msg = _deserialize(data)
-            if msg.metadata.get("system"):
-                return "Error: cannot remove system heartbeats"
-        except Exception:
-            return "Error: failed to read pending message"
+        filepaths = []
+        for pending_id in normalized:
+            filepath = queue._pending_dir / pending_id
+            if not filepath.exists():
+                return f"Error: pending message not found: {pending_id}"
 
-        queue.remove_pending(filepath)
-        return f"OK: removed {pending_id}"
+            # Check if it's a system heartbeat before mutating anything.
+            try:
+                data = json.loads(filepath.read_text())
+                msg = _deserialize(data)
+                if msg.metadata.get("system"):
+                    return "Error: cannot remove system heartbeats"
+            except Exception:
+                return f"Error: failed to read pending message: {pending_id}"
+            filepaths.append(filepath)
+
+        removed: list[str] = []
+        for filepath in filepaths:
+            if queue.remove_pending(filepath):
+                removed.append(filepath.name)
+
+        if len(removed) != len(normalized):
+            return "Error: one or more pending messages disappeared before removal"
+        return f"OK: removed {len(removed)} pending action(s): {', '.join(removed)}"
 
     return schedule_action
+
+
+def _normalize_adds(
+    adds: list[dict[str, Any]] | str | None,
+) -> list[dict[str, Any]] | str:
+    if isinstance(adds, str):
+        try:
+            adds = json.loads(adds)
+        except (json.JSONDecodeError, TypeError):
+            return "Error: 'adds' must be an array for batch_add"
+    if not isinstance(adds, list):
+        return "Error: 'adds' must be an array for batch_add"
+    if not adds:
+        return "Error: 'adds' must contain at least one item"
+    if len(adds) > 12:
+        return "Error: 'adds' supports at most 12 items"
+    if not all(isinstance(item, dict) for item in adds):
+        return "Error: each batch_add item must be an object"
+    return adds
+
+
+def _validate_adds(adds: list[dict[str, Any]]) -> str | None:
+    allowed_keys = {"reason", "trigger_spec"}
+    for index, item in enumerate(adds, start=1):
+        extra = sorted(set(item) - allowed_keys)
+        if extra:
+            return f"Error: invalid batch_add item {index} keys: " + ", ".join(extra)
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return f"Error: batch_add item {index} requires non-empty 'reason'"
+        trigger_spec = item.get("trigger_spec")
+        if not isinstance(trigger_spec, str) or not trigger_spec.strip():
+            return f"Error: batch_add item {index} requires non-empty 'trigger_spec'"
+    return None
+
+
+def _normalize_pending_ids(
+    pending_ids: list[str] | str | None,
+) -> list[str] | str:
+    if isinstance(pending_ids, str):
+        try:
+            pending_ids = json.loads(pending_ids)
+        except (json.JSONDecodeError, TypeError):
+            return "Error: 'pending_ids' must be an array for batch_remove"
+    if not isinstance(pending_ids, list):
+        return "Error: 'pending_ids' must be an array for batch_remove"
+    if not pending_ids:
+        return "Error: 'pending_ids' must contain at least one item"
+    if len(pending_ids) > 12:
+        return "Error: 'pending_ids' supports at most 12 items"
+    if not all(isinstance(item, str) for item in pending_ids):
+        return "Error: each batch_remove pending_id must be a string"
+    return pending_ids
+
+
+def _validate_pending_ids(pending_ids: list[str]) -> str | None:
+    seen: set[str] = set()
+    for pending_id in pending_ids:
+        if not pending_id.strip():
+            return "Error: each batch_remove pending_id must be non-empty"
+        if "/" in pending_id or "\\" in pending_id:
+            return f"Error: invalid pending_id: {pending_id}"
+        if pending_id in seen:
+            return f"Error: duplicate pending_id '{pending_id}'"
+        seen.add(pending_id)
+    return None

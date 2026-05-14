@@ -26,28 +26,36 @@ class TestAnalyzeTurnEffects:
         assert effects.had_schedule_mutation is False
         assert effects.is_scheduled_noop is True
 
-    def test_schedule_add_success_is_mutation(self):
+    def test_schedule_batch_add_success_is_mutation(self):
         msgs = _build_turn(
             tool_calls=[
                 ToolCall(
                     id="c1",
                     name="schedule_action",
-                    arguments={"action": "add", "reason": "x", "trigger_spec": "2026-02-23T22:00"},
+                    arguments={
+                        "action": "batch_add",
+                        "adds": [
+                            {
+                                "reason": "x",
+                                "trigger_spec": "2026-02-23T22:00",
+                            }
+                        ],
+                    },
                 )
             ],
-            results={"c1": "OK: scheduled at 2026-02-23 22:00 (2.0h from now)"},
+            results={"c1": ("OK: scheduled 1 action(s)\n- 2026-02-23 22:00 (2.0h from now): x")},
         )
         effects = analyze_turn_effects(msgs, had_send_message=False)
         assert effects.had_schedule_mutation is True
         assert effects.is_scheduled_noop is False
 
-    def test_schedule_remove_failure_not_mutation(self):
+    def test_schedule_batch_remove_failure_not_mutation(self):
         msgs = _build_turn(
             tool_calls=[
                 ToolCall(
                     id="c1",
                     name="schedule_action",
-                    arguments={"action": "remove", "pending_id": "x.json"},
+                    arguments={"action": "batch_remove", "pending_ids": ["x.json"]},
                 )
             ],
             results={"c1": "Error: pending message not found: x.json"},
@@ -139,9 +147,7 @@ class TestAnalyzeTurnEffects:
                                 "path": "memory/agent/recent.md",
                             }
                         ],
-                        "errors": [
-                            {"request_id": "r2", "code": "x", "detail": "failed"}
-                        ],
+                        "errors": [{"request_id": "r2", "code": "x", "detail": "failed"}],
                         "warnings": [],
                     }
                 )
@@ -187,12 +193,7 @@ class TestAnalyzeTurnEffects:
                     },
                 )
             ],
-            results={
-                "c1": (
-                    "OK: batch updated 1/1 note(s). "
-                    "Results: meeting_context:changed"
-                )
-            },
+            results={"c1": ("OK: batch updated 1/1 note(s). Results: meeting_context:changed")},
         )
         effects = analyze_turn_effects(msgs, had_send_message=False)
         assert effects.had_note_mutation is True

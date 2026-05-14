@@ -163,6 +163,7 @@ from .m0152_notes_title_body_rules import M0152NotesTitleBodyRules
 from .m0153_self_improvement_prompt import M0153SelfImprovementPrompt
 from .m0154_mail_tool_prompt import M0154MailToolPrompt
 from .m0155_state_commit_tool_budget import M0155StateCommitToolBudget
+from .m0156_schedule_action_batch import M0156ScheduleActionBatch
 
 ALL_MIGRATIONS = [
     M0001Initial(),
@@ -318,4 +319,5 @@ ALL_MIGRATIONS = [
     M0153SelfImprovementPrompt(),
     M0154MailToolPrompt(),
     M0155StateCommitToolBudget(),
+    M0156ScheduleActionBatch(),
 ]
