@@ -83,6 +83,14 @@ def _install_llm_retry_ui_handler(console) -> None:
     retry_logger.setLevel(logging.DEBUG)
 
 
+def _agent_supports_response_schema(agent_config) -> bool:
+    """Return true only when every failover candidate accepts response_schema."""
+    return all(
+        llm_config.supports_response_schema()
+        for llm_config in [agent_config.llm, *agent_config.llm_fallbacks]
+    )
+
+
 def _codex_cache_bucket(ttl: str, *, current_time: datetime | None = None) -> str | None:
     now = current_time or tz_now()
     if ttl == "24h":
@@ -358,7 +366,7 @@ def main(user: str, resume: str | None = None) -> None:
     memory_planner = MemoryEditPlanner(
         memory_editor_client,
         memory_editor_prompt,
-        supports_response_schema=memory_editor_config.llm.supports_response_schema(),
+        supports_response_schema=_agent_supports_response_schema(memory_editor_config),
         parse_retries=memory_editor_config.post_parse_retries,
         parse_retry_prompt=memory_editor_parse_retry,
     )

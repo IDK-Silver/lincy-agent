@@ -137,15 +137,22 @@ def test_repo_agent_config_brain_uses_deepseek_v4_pro_with_expected_fallbacks():
     ]
 
 
-def test_repo_agent_config_memory_editor_uses_codex_gpt55_low_thinking():
+def test_repo_agent_config_memory_editor_uses_deepseek_v4_flash_no_thinking():
     config = config_module.load_config("agent.yaml")
 
     memory_editor_llm = config.agents["memory_editor"].llm
-    assert memory_editor_llm.provider == "codex"
-    assert memory_editor_llm.model == "gpt-5.5"
-    assert memory_editor_llm.reasoning is not None
-    assert memory_editor_llm.reasoning.enabled is True
-    assert memory_editor_llm.reasoning.effort == "low"
+    assert memory_editor_llm.provider == "deepseek"
+    assert memory_editor_llm.model == "deepseek-v4-flash"
+    assert memory_editor_llm.thinking is not None
+    assert memory_editor_llm.thinking.enabled is False
+    assert memory_editor_llm.thinking.effort is None
+
+    fallbacks = config.agents["memory_editor"].llm_fallbacks
+    assert [cfg.provider for cfg in fallbacks] == ["codex", "ollama"]
+    assert [cfg.model for cfg in fallbacks] == [
+        "gpt-5.5",
+        "qwen3.5:397b-cloud",
+    ]
 
 
 def test_repo_kimi_k26_cloud_profile_loads():
