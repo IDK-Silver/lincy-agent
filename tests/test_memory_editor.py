@@ -27,7 +27,16 @@ class _StaticPlanner:
     def __init__(self, plans: dict[str, MemoryEditPlan]):
         self._plans = plans
 
-    def plan(self, *, request, as_of, turn_id, file_exists, file_content):  # noqa: ANN001,ARG002
+    def plan(  # noqa: ANN001,ARG002
+        self,
+        *,
+        request,
+        as_of,
+        turn_id,
+        file_exists,
+        file_content,
+        file_content_available=True,
+    ):
         return self._plans[request.request_id]
 
 
@@ -38,7 +47,16 @@ class _BarrierPlanner:
         self._plans = plans
         self._barrier = Barrier(parties)
 
-    def plan(self, *, request, as_of, turn_id, file_exists, file_content):  # noqa: ANN001,ARG002
+    def plan(  # noqa: ANN001,ARG002
+        self,
+        *,
+        request,
+        as_of,
+        turn_id,
+        file_exists,
+        file_content,
+        file_content_available=True,
+    ):
         try:
             self._barrier.wait(timeout=1.0)
         except BrokenBarrierError as e:
@@ -51,7 +69,16 @@ class _BarrierPlanner:
 class _SameFileOrderPlanner:
     """Planner stub asserting same-file requests observe sequential state."""
 
-    def plan(self, *, request, as_of, turn_id, file_exists, file_content):  # noqa: ANN001,ARG002
+    def plan(  # noqa: ANN001,ARG002
+        self,
+        *,
+        request,
+        as_of,
+        turn_id,
+        file_exists,
+        file_content,
+        file_content_available=True,
+    ):
         if request.request_id == "r1":
             assert file_exists is False
             return MemoryEditPlan(
@@ -66,6 +93,34 @@ class _SameFileOrderPlanner:
                 operations=[MemoryEditOperation(kind="append_entry", payload_text="- second")],
             )
         raise AssertionError(f"unexpected request_id: {request.request_id}")
+
+
+class _RecordingPlanner:
+    """Planner stub that records target-file context."""
+
+    def __init__(self, plans: dict[str, MemoryEditPlan]):
+        self._plans = plans
+        self.calls: list[dict[str, object]] = []
+
+    def plan(  # noqa: ANN001,ARG002
+        self,
+        *,
+        request,
+        as_of,
+        turn_id,
+        file_exists,
+        file_content,
+        file_content_available=True,
+    ):
+        self.calls.append(
+            {
+                "request_id": request.request_id,
+                "file_exists": file_exists,
+                "file_content": file_content,
+                "file_content_available": file_content_available,
+            }
+        )
+        return self._plans[request.request_id]
 
 
 def test_apply_delete_file_removes_existing(tmp_path: Path):
@@ -200,6 +255,112 @@ def test_memory_editor_applies_instruction_plan(tmp_path: Path):
     assert result.status == "ok"
     assert result.applied[0].status == "applied"
     assert "- [2026-02-11 00:46] append" in target.read_text(encoding="utf-8")
+
+
+def test_temp_memory_append_does_not_read_existing_file(tmp_path: Path, monkeypatch):
+    target = tmp_path / "memory" / "agent" / "temp-memory.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("- [2026-05-17 10:00] 毓峰 existing entry。\n", encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def guarded_read_text(self, *args, **kwargs):  # noqa: ANN001
+        if self == target:
+            raise AssertionError("temp-memory.md must not be read for append")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    request = MemoryEditRequest(
+        request_id="r1",
+        target_path="memory/agent/temp-memory.md",
+        instruction="追加條目：毓峰要求 temp-memory append-only。",
+    )
+    plan = MemoryEditPlan(
+        status="ok",
+        operations=[
+            MemoryEditOperation(
+                kind="append_entry",
+                payload_text=(
+                    "- [2026-05-17 20:05] 毓峰要求 temp-memory 寫入不要讀全文。"
+                ),
+            )
+        ],
+    )
+    batch = MemoryEditBatch(
+        as_of="2026-05-17T20:05:00+08:00",
+        turn_id="turn-1",
+        requests=[request],
+    )
+    planner = _RecordingPlanner({"r1": plan})
+
+    editor = MemoryEditor(commit_log=SessionCommitLog(), planner=planner)
+    result = editor.apply_batch(batch, allowed_paths=_allowed(tmp_path), base_dir=tmp_path)
+
+    assert result.status == "ok"
+    assert result.applied[0].status == "applied"
+    assert planner.calls == [
+        {
+            "request_id": "r1",
+            "file_exists": True,
+            "file_content": "",
+            "file_content_available": False,
+        }
+    ]
+    with target.open(encoding="utf-8") as f:
+        content = f.read()
+    assert content == (
+        "- [2026-05-17 10:00] 毓峰 existing entry。\n"
+        "- [2026-05-17 20:05] 毓峰要求 temp-memory 寫入不要讀全文。\n"
+    )
+
+
+def test_temp_memory_rejects_non_append_plan_without_reading_file(tmp_path: Path, monkeypatch):
+    target = tmp_path / "memory" / "agent" / "temp-memory.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = "- [2026-05-17 10:00] 毓峰 existing entry。\n"
+    target.write_text(original, encoding="utf-8")
+
+    original_read_text = Path.read_text
+
+    def guarded_read_text(self, *args, **kwargs):  # noqa: ANN001
+        if self == target:
+            raise AssertionError("temp-memory.md must not be read for append-only rejection")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+
+    request = MemoryEditRequest(
+        request_id="r1",
+        target_path="memory/agent/temp-memory.md",
+        instruction="修改舊條目",
+    )
+    plan = MemoryEditPlan(
+        status="ok",
+        operations=[
+            MemoryEditOperation(
+                kind="replace_block",
+                old_block="existing",
+                new_block="changed",
+            )
+        ],
+    )
+    batch = MemoryEditBatch(
+        as_of="2026-05-17T20:05:00+08:00",
+        turn_id="turn-1",
+        requests=[request],
+    )
+
+    editor = MemoryEditor(
+        commit_log=SessionCommitLog(),
+        planner=_RecordingPlanner({"r1": plan}),
+    )
+    result = editor.apply_batch(batch, allowed_paths=_allowed(tmp_path), base_dir=tmp_path)
+
+    assert result.status == "failed"
+    assert result.errors[0].code == "temp_memory_append_only"
+    with target.open(encoding="utf-8") as f:
+        assert f.read() == original
 
 
 def test_memory_editor_idempotent_replay_with_same_planned_ops(tmp_path: Path):

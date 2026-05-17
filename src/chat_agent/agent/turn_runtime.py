@@ -32,6 +32,7 @@ class _MemoryFileSnapshot:
     existed: bool
     was_file: bool
     content: bytes | None = None
+    size: int | None = None
 
 
 class _TurnMemorySnapshot:
@@ -40,6 +41,9 @@ class _TurnMemorySnapshot:
     def __init__(self, *, agent_os_dir: Path):
         self._agent_os_dir = agent_os_dir
         self._memory_root = (agent_os_dir / "memory").resolve()
+        self._temp_memory_file = (
+            agent_os_dir / "memory" / "agent" / "temp-memory.md"
+        ).resolve()
         self._snapshots: dict[Path, _MemoryFileSnapshot] = {}
 
     def capture_from_tool_call(self, tool_call: ToolCall) -> None:
@@ -54,11 +58,18 @@ class _TurnMemorySnapshot:
 
             if resolved.exists():
                 if resolved.is_file():
-                    self._snapshots[resolved] = _MemoryFileSnapshot(
-                        existed=True,
-                        was_file=True,
-                        content=resolved.read_bytes(),
-                    )
+                    if resolved == self._temp_memory_file:
+                        self._snapshots[resolved] = _MemoryFileSnapshot(
+                            existed=True,
+                            was_file=True,
+                            size=resolved.stat().st_size,
+                        )
+                    else:
+                        self._snapshots[resolved] = _MemoryFileSnapshot(
+                            existed=True,
+                            was_file=True,
+                            content=resolved.read_bytes(),
+                        )
                 else:
                     self._snapshots[resolved] = _MemoryFileSnapshot(
                         existed=True,
@@ -81,6 +92,12 @@ class _TurnMemorySnapshot:
             snapshot = self._snapshots[path]
             if snapshot.existed:
                 if not snapshot.was_file:
+                    continue
+                if snapshot.size is not None:
+                    if path.exists() and path.is_file():
+                        with path.open("r+b") as f:
+                            f.truncate(snapshot.size)
+                        restored += 1
                     continue
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(snapshot.content or b"")

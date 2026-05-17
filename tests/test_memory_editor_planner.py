@@ -73,6 +73,8 @@ def test_memory_edit_planner_uses_native_response_schema_when_supported():
     assert plan.status == "ok"
     assert len(plan.operations) == 1
     assert client.calls[0]["response_schema"] is not None
+    user_payload = client.calls[0]["messages"][-1].content
+    assert '"content_available": true' in user_payload
 
 
 def test_memory_edit_planner_falls_back_to_text_json_when_schema_is_unsupported():
@@ -103,6 +105,34 @@ def test_memory_edit_planner_falls_back_to_text_json_when_schema_is_unsupported(
     assert messages[0].role == "system"
     assert messages[1].role == "system"
     assert "Native structured outputs are unavailable" in messages[1].content
+
+
+def test_memory_edit_planner_can_mark_file_content_unavailable():
+    client = _PlannerClient([
+        (
+            '{"status":"ok","operations":['
+            '{"kind":"append_entry","payload_text":"- note"}'
+            "]}"
+        )
+    ])
+    planner = MemoryEditPlanner(
+        client,
+        "You are the memory editor.",
+        supports_response_schema=True,
+    )
+
+    plan = planner.plan(
+        request=_request(),
+        as_of="2026-03-14T22:00:00+08:00",
+        turn_id="turn-1",
+        file_exists=True,
+        file_content="",
+        file_content_available=False,
+    )
+
+    assert plan.status == "ok"
+    user_payload = client.calls[0]["messages"][-1].content
+    assert '"content_available": false' in user_payload
 
 
 def test_memory_edit_planner_fallback_keeps_parse_retry_flow():

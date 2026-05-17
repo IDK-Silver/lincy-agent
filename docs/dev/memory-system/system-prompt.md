@@ -65,7 +65,7 @@ v0.8.0 用單一平面表格，v0.30.0 改為 3 類別：
 - 禁止直接使用 `write_file` / `edit_file` 寫 `memory/`
 - 禁止用 shell 重導向、`tee`、`sed -i` 寫 `memory/`
 - Brain 只可輸出 instruction request（`request_id`、`target_path`、`instruction`）
-- 實際規劃改由 `memory_editor` 子代理讀檔後產生 operations
+- 實際規劃改由 `memory_editor` 子代理產生 operations；一般目標會讀取目標檔全文，`memory/agent/temp-memory.md` 例外，只提供 request context，讓 editor 格式化成 append-only `append_entry`
 - 寫入由 deterministic `apply.py` 執行，失敗時 request 級回滾（atomic）
 
 ### 自我改進與習慣摸索

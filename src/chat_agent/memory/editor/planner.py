@@ -100,12 +100,14 @@ class MemoryEditPlanner:
         turn_id: str,
         file_exists: bool,
         file_content: str,
+        file_content_available: bool = True,
     ) -> MemoryEditPlan:
         """Generate deterministic operations for one instruction request."""
         # target_file first: stable prefix for API prompt caching on appends
         payload = {
             "target_file": {
                 "exists": file_exists,
+                "content_available": file_content_available,
                 "content": file_content,
             },
             "as_of": as_of,

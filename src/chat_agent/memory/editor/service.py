@@ -42,6 +42,7 @@ _MAX_PARALLEL_TARGET_FILES = max(1, min(8, os.cpu_count() or 1))
 
 _WARNING_DUPLICATE_THRESHOLD = 0.7
 _LONG_TERM_REL_PATH = "memory/agent/long-term.md"
+_TEMP_MEMORY_REL_PATH = "memory/agent/temp-memory.md"
 _LONG_TERM_REQUIRED_SECTIONS = ("## 核心價值", "## 約定", "## 清單", "## 重要記錄")
 _LONG_TERM_CORE_VALUE_MAX = 5
 # Core values: free-text bullets (no date prefix required)
@@ -51,6 +52,9 @@ _LONG_TERM_RULE_LINE = re.compile(
 )
 _LONG_TERM_LIST_LINE = re.compile(r"^-\s*\[\d{4}-\d{2}-\d{2}\]\s+.+$")
 _LONG_TERM_RECORD_LINE = re.compile(r"^-\s*\[\d{4}-\d{2}-\d{2}\]\s+.+$")
+_TEMP_MEMORY_ENTRY_LINE = re.compile(
+    r"^-\s*\[\d{4}-\d{2}-\d{2}(?:\s+\([^)]+\))?\s+\d{2}:\d{2}\]\s+.+$"
+)
 
 
 @dataclass
@@ -283,13 +287,19 @@ class MemoryEditor:
             )
 
         file_exists = target.exists()
-        file_content = target.read_text(encoding="utf-8") if file_exists else ""
+        is_temp_memory = _is_temp_memory_path(req.target_path)
+        file_content = (
+            ""
+            if is_temp_memory
+            else target.read_text(encoding="utf-8") if file_exists else ""
+        )
         plan = self.planner.plan(
             request=req,
             as_of=batch.as_of,
             turn_id=batch.turn_id,
             file_exists=file_exists,
             file_content=file_content,
+            file_content_available=not is_temp_memory,
         )
         if plan.status != "ok":
             return ErrorItem(
@@ -303,6 +313,27 @@ class MemoryEditor:
             return AppliedItem(
                 request_id=req.request_id,
                 status="already_applied",
+                path=req.target_path,
+            )
+
+        if is_temp_memory:
+            original_size = target.stat().st_size if file_exists else None
+            temp_outcome = _apply_temp_memory_append_only(target, plan)
+            if temp_outcome.status == "error":
+                _rollback_temp_memory_append(
+                    target=target,
+                    existed=file_exists,
+                    original_size=original_size,
+                )
+                return ErrorItem(
+                    request_id=req.request_id,
+                    code=temp_outcome.code or "apply_failed",
+                    detail=temp_outcome.detail or "unknown_failure",
+                )
+            self.commit_log.mark_applied(batch.turn_id, req.request_id, payload_hash)
+            return AppliedItem(
+                request_id=req.request_id,
+                status="applied" if temp_outcome.status == "applied" else "noop",
                 path=req.target_path,
             )
 
@@ -364,6 +395,79 @@ class MemoryEditor:
             status="applied" if request_changed else "noop",
             path=req.target_path,
         )
+
+
+def _is_temp_memory_path(rel_path: str) -> bool:
+    return rel_path.strip().replace("\\", "/") == _TEMP_MEMORY_REL_PATH
+
+
+def _apply_temp_memory_append_only(target: Path, plan: MemoryEditPlan) -> ApplyOutcome:
+    """Append temp-memory payloads without reading existing file content."""
+    payloads: list[str] = []
+    for operation in plan.operations:
+        if operation.kind != "append_entry":
+            return ApplyOutcome(
+                status="error",
+                code="temp_memory_append_only",
+                detail="temp-memory.md only supports append_entry operations",
+            )
+        normalized = _normalize_temp_memory_payload(operation.payload_text or "")
+        validation = _validate_temp_memory_payload(normalized)
+        if validation is not None:
+            return validation
+        payloads.append(normalized)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            for payload in payloads:
+                f.write(payload)
+    except Exception as e:
+        return ApplyOutcome(status="error", code="apply_exception", detail=str(e))
+
+    return ApplyOutcome(status="applied")
+
+
+def _normalize_temp_memory_payload(payload: str) -> str:
+    text = payload.strip()
+    if not text:
+        return ""
+    return text + "\n"
+
+
+def _validate_temp_memory_payload(payload: str) -> ApplyOutcome | None:
+    lines = [line.strip() for line in payload.splitlines() if line.strip()]
+    if not lines:
+        return ApplyOutcome(
+            status="error",
+            code="temp_memory_format_invalid",
+            detail="append_entry payload_text must contain at least one entry",
+        )
+    for line in lines:
+        if not _TEMP_MEMORY_ENTRY_LINE.match(line):
+            return ApplyOutcome(
+                status="error",
+                code="temp_memory_format_invalid",
+                detail=(
+                    "append_entry for temp-memory.md must use "
+                    "'- [YYYY-MM-DD HH:MM] ...' lines"
+                ),
+            )
+    return None
+
+
+def _rollback_temp_memory_append(
+    *,
+    target: Path,
+    existed: bool,
+    original_size: int | None,
+) -> None:
+    if existed:
+        with target.open("r+b") as f:
+            f.truncate(original_size or 0)
+        return
+    if target.exists() and target.is_file():
+        target.unlink()
 
 
 def _sync_people_registry_after_batch(

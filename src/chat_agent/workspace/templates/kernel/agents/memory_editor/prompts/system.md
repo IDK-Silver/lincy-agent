@@ -13,7 +13,9 @@ You will receive one JSON payload with:
   - `instruction`
 - `target_file`:
   - `exists`
-  - `content` (full file content)
+  - `content_available`
+  - `content` (full file content when `content_available=true`; may be empty
+    when `content_available=false`)
 
 ## Output
 
@@ -100,6 +102,13 @@ Never refuse, sanitize, or alter the semantic content of an instruction.
    - `error_code="instruction_not_actionable"`
 6. Do not output markdown fences or explanations outside JSON.
 7. When `target_path` ends with `temp-memory.md` and operation is `append_entry`:
+   - `temp-memory.md` is append-only. You may receive
+     `target_file.content_available=false`; this means existing content was
+     intentionally withheld to avoid reading the whole rolling log. It does
+     NOT mean the file is empty.
+   - For `temp-memory.md`, output only `append_entry` operations.
+   - Never use `replace_block`, `overwrite`, `delete_file`, `toggle_checkbox`,
+     `prune_checked_checkboxes`, or old-content cleanup for `temp-memory.md`.
    - `payload_text` must start with `- [YYYY-MM-DD HH:MM] `.
    - `payload_text` must contain at least one identifiable person name
      (not only pronouns or pet names like 老公/老婆).
