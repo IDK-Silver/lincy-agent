@@ -165,6 +165,7 @@ from .m0154_mail_tool_prompt import M0154MailToolPrompt
 from .m0155_state_commit_tool_budget import M0155StateCommitToolBudget
 from .m0156_schedule_action_batch import M0156ScheduleActionBatch
 from .m0157_temp_memory_append_only import M0157TempMemoryAppendOnly
+from .m0158_heartbeat_reliability_prompt import M0158HeartbeatReliabilityPrompt
 
 ALL_MIGRATIONS = [
     M0001Initial(),
@@ -322,4 +323,5 @@ ALL_MIGRATIONS = [
     M0155StateCommitToolBudget(),
     M0156ScheduleActionBatch(),
     M0157TempMemoryAppendOnly(),
+    M0158HeartbeatReliabilityPrompt(),
 ]

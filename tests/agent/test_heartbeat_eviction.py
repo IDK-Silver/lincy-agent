@@ -1,5 +1,6 @@
 """Tests for system turn eviction from in-memory conversation."""
 
+from datetime import datetime
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,8 +10,9 @@ import pytest
 from chat_agent.agent.schema import InboundMessage
 from chat_agent.agent.turn_context import TurnContext
 from chat_agent.context.conversation import Conversation
+from chat_agent.core.schema import HeartbeatConfig
 from chat_agent.llm.schema import ToolCall
-from chat_agent.timezone_utils import now as tz_now
+from chat_agent.timezone_utils import get_tz, now as tz_now
 
 
 def _make_system_heartbeat(**overrides):
@@ -248,6 +250,128 @@ class TestSilentHeartbeatEviction:
 
         # No eviction because turn_context is None
         assert len(conv.get_messages()) == 1
+
+
+class TestHeartbeatReliabilityNotice:
+    """Recurring heartbeat turns should carry reliability guidance."""
+
+    def test_recurring_heartbeat_gets_reliability_notice(self, tmp_path):
+        """Recurring heartbeat content includes the reliability notice."""
+        core, q, _conv, _tc = _make_core(tmp_path)
+        captured: dict[str, str] = {}
+
+        def fake_turn(content, **kwargs):
+            captured["content"] = content
+            return "completed"
+
+        core.run_turn.side_effect = fake_turn
+
+        msg = _make_system_heartbeat()
+        q.put(msg)
+        _, receipt = q.get()
+
+        with patch.object(core, "_schedule_next_heartbeat"):
+            core._process_inbound(msg, receipt)
+
+        assert "[Heartbeat Reliability Notice]" in captured["content"]
+        assert "future heartbeat will not wake you up" in captured["content"]
+
+    def test_non_heartbeat_does_not_get_reliability_notice(self, tmp_path):
+        """Regular user turns should not receive heartbeat-only guidance."""
+        core, q, _conv, _tc = _make_core(tmp_path)
+        captured: dict[str, str] = {}
+
+        def fake_turn(content, **kwargs):
+            captured["content"] = content
+            return "completed"
+
+        core.run_turn.side_effect = fake_turn
+
+        msg = InboundMessage(
+            channel="cli",
+            content="hi",
+            priority=0,
+            sender="alice",
+        )
+        q.put(msg)
+        _, receipt = q.get()
+        core._process_inbound(msg, receipt)
+
+        assert "[Heartbeat Reliability Notice]" not in captured["content"]
+
+    def test_quiet_hours_warning_when_next_heartbeat_would_be_deferred(
+        self, tmp_path
+    ):
+        """Quiet-hours warning appears when the earliest next heartbeat is blocked."""
+        core, q, _conv, _tc = _make_core(tmp_path)
+        core.config = SimpleNamespace(
+            app=SimpleNamespace(timezone="UTC+8"),
+            heartbeat=HeartbeatConfig(quiet_hours=["23:30-07:30"]),
+        )
+        captured: dict[str, str] = {}
+
+        def fake_turn(content, **kwargs):
+            captured["content"] = content
+            return "completed"
+
+        core.run_turn.side_effect = fake_turn
+        fixed_now = datetime(2026, 2, 21, 23, 0, tzinfo=get_tz())
+        msg = _make_system_heartbeat(
+            metadata={
+                "system": True,
+                "recurring": True,
+                "recur_spec": "30m-60m",
+            }
+        )
+        q.put(msg)
+        _, receipt = q.get()
+
+        with (
+            patch("chat_agent.agent.core.tz_now", return_value=fixed_now),
+            patch.object(core, "_schedule_next_heartbeat"),
+        ):
+            core._process_inbound(msg, receipt)
+
+        assert "[Heartbeat Reliability Notice]" in captured["content"]
+        assert "[Heartbeat Quiet-Hours Warning]" in captured["content"]
+        assert "last heartbeat before quiet hours" in captured["content"]
+
+    def test_quiet_hours_warning_omitted_when_next_heartbeat_is_clear(
+        self, tmp_path
+    ):
+        """Quiet-hours warning is omitted while the earliest next heartbeat is clear."""
+        core, q, _conv, _tc = _make_core(tmp_path)
+        core.config = SimpleNamespace(
+            app=SimpleNamespace(timezone="UTC+8"),
+            heartbeat=HeartbeatConfig(quiet_hours=["23:30-07:30"]),
+        )
+        captured: dict[str, str] = {}
+
+        def fake_turn(content, **kwargs):
+            captured["content"] = content
+            return "completed"
+
+        core.run_turn.side_effect = fake_turn
+        fixed_now = datetime(2026, 2, 21, 20, 0, tzinfo=get_tz())
+        msg = _make_system_heartbeat(
+            metadata={
+                "system": True,
+                "recurring": True,
+                "recur_spec": "30m-60m",
+            }
+        )
+        q.put(msg)
+        _, receipt = q.get()
+
+        with (
+            patch("chat_agent.agent.core.tz_now", return_value=fixed_now),
+            patch.object(core, "_schedule_next_heartbeat"),
+        ):
+            core._process_inbound(msg, receipt)
+
+        assert "[Heartbeat Reliability Notice]" in captured["content"]
+        assert "[Heartbeat Quiet-Hours Warning]" not in captured["content"]
+
 
 class TestScheduledNoopEviction:
     """Scheduled system turns should evict only when truly no-op."""

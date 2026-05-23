@@ -109,6 +109,24 @@ _READ_CACHE_MEASURABLE_PROVIDERS = frozenset(
 )
 
 TurnRunStatus = Literal["completed", "failed", "interrupted"]
+
+_HEARTBEAT_RELIABILITY_NOTICE = (
+    "[Heartbeat Reliability Notice]\n"
+    "Heartbeat is opportunistic background scanning, not a reliable follow-up "
+    "or wake-up guarantee.\n"
+    "agent_note, temp-memory.md, and a future heartbeat will not wake you up.\n"
+    "If medication, health, safety, travel, promises, or any open-loop "
+    "user-care state must be checked later, create schedule_action now unless "
+    "you explicitly decide not to follow up and persist the reason."
+)
+
+_HEARTBEAT_QUIET_HOURS_NOTICE = (
+    "[Heartbeat Quiet-Hours Warning]\n"
+    "The earliest next heartbeat would be deferred by quiet hours. This may be "
+    "the last heartbeat before quiet hours.\n"
+    "Do not leave user-care goals to heartbeat. Create schedule_action for "
+    "every required later check now."
+)
 TurnFailureCategory = Literal[
     "request-format",
     "provider-api",
@@ -1888,6 +1906,61 @@ class AgentCore:
         task_block = task_store.format_task_list(pending)
         return f"{content}\n\n## Tasks ({len(pending)})\n{task_block}"
 
+    def _inject_heartbeat_reliability_notice(
+        self,
+        msg: InboundMessage,
+        content: str,
+        *,
+        processing_started_at: datetime,
+    ) -> str:
+        """Append per-turn heartbeat reliability guidance to recurring heartbeats."""
+        is_heartbeat = bool(
+            msg.metadata.get("system") and msg.metadata.get("recurring")
+        )
+        if not is_heartbeat:
+            return content
+
+        notices = [_HEARTBEAT_RELIABILITY_NOTICE]
+        if self._earliest_next_heartbeat_hits_quiet_hours(
+            msg,
+            processing_started_at=processing_started_at,
+        ):
+            notices.append(_HEARTBEAT_QUIET_HOURS_NOTICE)
+        return f"{content}\n\n" + "\n\n".join(notices)
+
+    def _earliest_next_heartbeat_hits_quiet_hours(
+        self,
+        msg: InboundMessage,
+        *,
+        processing_started_at: datetime,
+    ) -> bool:
+        """Return True when the minimum next heartbeat delay lands in quiet hours."""
+        recur_spec = msg.metadata.get("recur_spec")
+        if not isinstance(recur_spec, str) or not recur_spec.strip():
+            return False
+        try:
+            from .adapters.scheduler import parse_interval
+
+            min_minutes, _ = parse_interval(recur_spec)
+        except ValueError:
+            return False
+
+        heartbeat_cfg = getattr(self.config, "heartbeat", None)
+        parsed_quiet_windows = getattr(heartbeat_cfg, "parsed_quiet_windows", None)
+        if not callable(parsed_quiet_windows):
+            return False
+        try:
+            windows = parsed_quiet_windows()
+        except Exception:
+            return False
+        if not isinstance(windows, list) or not windows:
+            return False
+
+        from ..core.schema import is_in_quiet_hours
+
+        earliest_next = processing_started_at + timedelta(minutes=min_minutes)
+        return is_in_quiet_hours(earliest_next, windows, get_tz())
+
     def _inject_note_triggers(self, msg: InboundMessage, content: str) -> str:
         """Append [NOTE UPDATE] hint when user message matches note triggers."""
         note_store = getattr(self, "note_store", None)
@@ -2171,6 +2244,11 @@ class AgentCore:
                 # Dynamic content injection before run_turn
                 turn_content = msg.content
                 turn_content = self._inject_task_context(msg, turn_content)
+                turn_content = self._inject_heartbeat_reliability_notice(
+                    msg,
+                    turn_content,
+                    processing_started_at=processing_started_at,
+                )
                 turn_content = self._inject_note_triggers(msg, turn_content)
 
                 turn_status = self.run_turn(
