@@ -97,6 +97,8 @@ Complete 一個 recurring task 時：
 
 一次性 task（`recurrence=null`）complete 後 status 設為 `completed`，不再排程。
 
+`agent_task(action="complete", ...)` 只代表 agent 自己的工作完成，例如已送提醒、已查資料、已整理資訊。它不代表使用者目標已閉環。若任務內容涉及用藥、健康、安全、行程、承諾，或仍需要確認使用者是否真的完成，必須另外用 `schedule_action` 排一次性追蹤；`agent_note` 只能保存狀態，不會喚醒 agent。
+
 ## Tool 定義：`agent_task`
 
 ```

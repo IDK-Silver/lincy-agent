@@ -105,6 +105,24 @@ metadata = {
 }
 ```
 
+### Heartbeat Reliability Notice
+
+Recurring heartbeat 在進入 brain 前，runtime 會把 `[Heartbeat Reliability Notice]` 附加到最新 turn 的 user content。
+
+這個 notice 的目的：
+
+- 提醒模型 heartbeat 只是 opportunistic background scan，不是可靠追蹤或喚醒保證
+- 明確禁止把用藥、健康、安全、行程、承諾、未閉環狀態留給未來 heartbeat、`agent_note` 或 `temp-memory.md`
+- 要求需要稍後確認的事同輪建立 `schedule_action`；若明確不追蹤，需保存理由
+
+若依目前 `recur_spec` 的最短間隔計算，下一個 heartbeat 會落入 `quiet_hours` 並被延後，runtime 會再附加 `[Heartbeat Quiet-Hours Warning]`。這代表這輪可能是 quiet hours 前最後一次 heartbeat；任何必要追蹤都必須立刻用 `schedule_action` 排好。
+
+注入規則：
+
+- 只加在 latest heartbeat turn 的 user content
+- 不新增 system message
+- 不改 system prompt / boot files / 舊歷史前綴，避免破壞 prompt cache
+
 ## schedule_action Tool
 
 Agent 透過此 tool 排程未來的喚醒：
