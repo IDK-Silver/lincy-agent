@@ -8,10 +8,8 @@ api_key_env: DEEPSEEK_API_KEY
 # The client appends /chat/completions.
 base_url: https://api.deepseek.com
 
-# Keep provider default output cap.
-# DeepSeek docs currently publish a maximum output of 384K for V4 models,
-# but this profile intentionally avoids a hard cap unless the caller needs one.
-max_tokens: null
+# Keep runaway hidden reasoning from blocking the agent for many minutes.
+max_tokens: 8192
 
 # DeepSeek may keep requests connected while waiting for inference.
 # Pro thinking requests can be slower than flash/no-thinking calls.

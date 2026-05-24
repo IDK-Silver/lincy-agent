@@ -117,42 +117,46 @@ def test_repo_agent_config_enables_shell_handoff_rules():
     ]
 
 
-def test_repo_agent_config_brain_uses_deepseek_v4_pro_with_expected_fallbacks():
+def test_repo_agent_config_brain_uses_codex_with_expected_fallbacks():
     config = config_module.load_config("agent.yaml")
 
     brain_llm = config.agents["brain"].llm
-    assert brain_llm.provider == "deepseek"
-    assert brain_llm.model == "deepseek-v4-pro"
-    assert brain_llm.thinking is not None
-    assert brain_llm.thinking.enabled is True
-    assert brain_llm.thinking.effort == "max"
+    assert brain_llm.provider == "codex"
+    assert brain_llm.model == "gpt-5.5"
+    assert brain_llm.reasoning is not None
+    assert brain_llm.reasoning.enabled is True
+    assert brain_llm.reasoning.effort == "xhigh"
     assert brain_llm.temperature is None
 
     fallbacks = config.agents["brain"].llm_fallbacks
-    assert [cfg.provider for cfg in fallbacks] == ["codex", "ollama", "ollama"]
+    assert [cfg.provider for cfg in fallbacks] == ["deepseek", "codex", "codex"]
     assert [cfg.model for cfg in fallbacks] == [
-        "gpt-5.5",
-        "qwen3.5:397b-cloud",
-        "kimi-k2.6:cloud",
+        "deepseek-v4-pro",
+        "gpt-5.4",
+        "gpt-5.3-codex",
     ]
+    assert fallbacks[0].thinking.enabled is True
 
 
-def test_repo_agent_config_memory_editor_uses_deepseek_v4_flash_no_thinking():
+def test_repo_agent_config_memory_editor_uses_codex_no_thinking():
     config = config_module.load_config("agent.yaml")
 
     memory_editor_llm = config.agents["memory_editor"].llm
-    assert memory_editor_llm.provider == "deepseek"
-    assert memory_editor_llm.model == "deepseek-v4-flash"
-    assert memory_editor_llm.thinking is not None
-    assert memory_editor_llm.thinking.enabled is False
-    assert memory_editor_llm.thinking.effort is None
+    assert memory_editor_llm.provider == "codex"
+    assert memory_editor_llm.model == "gpt-5.5"
+    assert memory_editor_llm.reasoning is not None
+    assert memory_editor_llm.reasoning.enabled is False
+    assert memory_editor_llm.reasoning.effort is None
 
     fallbacks = config.agents["memory_editor"].llm_fallbacks
-    assert [cfg.provider for cfg in fallbacks] == ["codex", "ollama"]
+    assert [cfg.provider for cfg in fallbacks] == ["deepseek", "codex", "codex"]
     assert [cfg.model for cfg in fallbacks] == [
-        "gpt-5.5",
-        "qwen3.5:397b-cloud",
+        "deepseek-v4-flash",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
     ]
+    assert fallbacks[0].thinking.enabled is False
+    assert all(cfg.reasoning.enabled is False for cfg in fallbacks[1:])
 
 
 def test_repo_kimi_k26_cloud_profile_loads():

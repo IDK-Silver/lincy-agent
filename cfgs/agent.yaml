@@ -146,7 +146,7 @@ heartbeat:
 
 # Tool security
 tools:
-  max_tool_iterations: 1000 # max tool call iterations per turn
+  max_tool_iterations: 50 # max tool call iterations per turn
   allowed_paths:
     - "~"
     - "/tmp"
@@ -263,11 +263,11 @@ tools:
 # Agents
 agents:
   brain:
-    llm: cfgs/llm/deepseek/deepseek-v4-pro/thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/thinking.yaml
     llm_fallbacks:
-      - cfgs/llm/codex/gpt-5.5/thinking.yaml
-      - cfgs/llm/ollama/qwen3.5-397b-cloud/thinking.yaml
-      - cfgs/llm/ollama/kimi-k2.6-cloud/thinking.yaml
+      - cfgs/llm/deepseek/deepseek-v4-pro/thinking.yaml
+      - cfgs/llm/codex/gpt-5.4/thinking.yaml
+      - cfgs/llm/codex/gpt-5.3-codex/thinking.yaml
     llm_request_timeout: 180
     llm_transient_retries: 3
     warn_on_failure: true
@@ -284,7 +284,7 @@ agents:
         - "personal-skills/index.md"
 
   init:
-    llm: cfgs/llm/openrouter/qwen-qwen3.5-397b-a17b/thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/thinking.yaml
     llm_request_timeout: 120
     llm_transient_retries: 1
     warn_on_failure: true
@@ -298,7 +298,7 @@ agents:
 
   vision:
     enabled: true
-    llm: cfgs/llm/ollama/gemini-3-flash-preview-cloud/no-thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/no-thinking.yaml
     llm_request_timeout: 60
     llm_transient_retries: 1
     warn_on_failure: true
@@ -335,10 +335,11 @@ agents:
 
   memory_editor:
     enabled: true
-    llm: cfgs/llm/deepseek/deepseek-v4-flash/no-thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/no-thinking.yaml
     llm_fallbacks:
-      - cfgs/llm/codex/gpt-5.5/low-thinking.yaml
-      - cfgs/llm/ollama/qwen3.5-397b-cloud/thinking.yaml
+      - cfgs/llm/deepseek/deepseek-v4-flash/no-thinking.yaml
+      - cfgs/llm/codex/gpt-5.4-mini/no-thinking.yaml
+      - cfgs/llm/codex/gpt-5.3-codex/no-thinking.yaml
     llm_request_timeout: 120
     llm_transient_retries: 2 # transport/transient retry (timeout, 5xx, malformed provider payload)
     llm_rate_limit_retries: 5 # 429 retry with Retry-After/backoff
@@ -347,7 +348,7 @@ agents:
 
   gui_manager:
     enabled: false
-    llm: cfgs/llm/ollama/glm-5-cloud/no-thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/thinking.yaml
     llm_request_timeout: 180
     llm_transient_retries: 20
     warn_on_failure: true
@@ -366,7 +367,7 @@ agents:
 
   gui_worker:
     enabled: false
-    llm: cfgs/llm/ollama/gemini-3-flash-preview-cloud/no-thinking.yaml
+    llm: cfgs/llm/codex/gpt-5.5/no-thinking.yaml
     llm_request_timeout: 60
     llm_transient_retries: 1
     warn_on_failure: true

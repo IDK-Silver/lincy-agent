@@ -165,6 +165,52 @@ def test_agent_note_list_does_not_consume_state_commit_budget():
     assert response.content == "done"
 
 
+def test_repeated_agent_note_list_stops_same_turn():
+    registry = ToolRegistry()
+    executed: list[str] = []
+
+    def _agent_note(**kwargs):
+        executed.append(kwargs["action"])
+        return "No notes."
+
+    _register_tool(registry, "agent_note", _agent_note)
+    conversation = Conversation()
+    client = _Client([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id="t1", name="agent_note", arguments={"action": "list"})
+            ],
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id="t2", name="agent_note", arguments={"action": "list"})
+            ],
+        ),
+    ])
+
+    response = _run_responder(
+        client=client,
+        messages=_messages(),
+        tools=[],
+        conversation=conversation,
+        builder=_Builder(),
+        registry=registry,
+        console=_console(),
+        max_iterations=5,
+    )
+
+    assert client.calls == 2
+    assert executed == ["list"]
+    assert response.tool_calls == []
+    tool_results = [
+        msg for msg in conversation.get_messages()
+        if msg.role == "tool" and msg.name == "agent_note"
+    ]
+    assert len(tool_results) == 2
+    assert "repeated read-only agent_note call" in (tool_results[-1].content or "")
+    assert "delay the user" in (tool_results[-1].content or "")
+
+
 def test_failed_memory_edit_does_not_consume_retry_budget():
     registry = ToolRegistry()
     executed = 0
@@ -348,6 +394,53 @@ def test_schedule_action_list_does_not_consume_state_commit_budget():
     assert client.calls == 3
     assert executed == ["list", "batch_add"]
     assert response.content == "done"
+
+
+def test_repeated_schedule_action_list_stops_same_turn():
+    registry = ToolRegistry()
+    executed: list[str] = []
+
+    def _schedule_action(**kwargs):
+        executed.append(kwargs["action"])
+        return "No pending scheduled actions."
+
+    _register_tool(registry, "schedule_action", _schedule_action)
+    conversation = Conversation()
+    client = _Client([
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id="t1", name="schedule_action", arguments={"action": "list"})
+            ],
+        ),
+        LLMResponse(
+            tool_calls=[
+                ToolCall(id="t2", name="schedule_action", arguments={"action": "list"})
+            ],
+        ),
+    ])
+
+    response = _run_responder(
+        client=client,
+        messages=_messages(),
+        tools=[],
+        conversation=conversation,
+        builder=_Builder(),
+        registry=registry,
+        console=_console(),
+        max_iterations=5,
+    )
+
+    assert client.calls == 2
+    assert executed == ["list"]
+    assert response.tool_calls == []
+    tool_results = [
+        msg for msg in conversation.get_messages()
+        if msg.role == "tool" and msg.name == "schedule_action"
+    ]
+    assert len(tool_results) == 2
+    assert "repeated read-only schedule_action call" in (
+        tool_results[-1].content or ""
+    )
 
 
 def test_failed_schedule_action_does_not_consume_retry_budget():

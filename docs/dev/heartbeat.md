@@ -133,7 +133,7 @@ Agent 透過此 tool 排程未來的喚醒：
 | `list` | - | 列出所有待處理的系統訊息 |
 | `batch_remove` | `pending_ids=[...]` | 刪除一個或多個排程；單筆也放進 `pending_ids`（系統心跳不可刪） |
 
-寫入動作是 batch-only：同一 turn 中 `batch_add` / `batch_remove` 最多只能成功呼叫一次；只有失敗時才重試。`list` 是唯讀，不算提交。
+寫入動作是 batch-only：同一 turn 中 `batch_add` / `batch_remove` 最多只能成功呼叫一次；只有失敗時才重試。`list` 是唯讀，不算提交；但同一 turn 連續重複相同 `list` 會被 responder 擋下並結束 tool loop。
 
 Agent 排程的訊息 `priority=2`，真人 direct channel inbound（如 Discord / Gmail）通常為 `priority=1`，系統心跳 `priority=5`。
 

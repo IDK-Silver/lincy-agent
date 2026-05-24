@@ -30,7 +30,8 @@ AGENT_NOTE_DEFINITION = ToolDefinition(
         "'remove' deletes a note. "
         "Use batch_update for note updates even when updating only one key. "
         "Within one conversation turn, batch related updates instead of making "
-        "multiple agent_note calls. The list action is read-only. "
+        "multiple agent_note calls. The list action is read-only; do not repeat "
+        "the same list call in consecutive tool rounds. "
         "Triggers are phrases that, when found in a user message, prompt you to "
         "review and update the note."
     ),

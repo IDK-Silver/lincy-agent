@@ -53,7 +53,9 @@ SCHEDULE_ACTION_DEFINITION = ToolDefinition(
         "reminders in one call, 'list' to see pending scheduled actions, and "
         "'batch_remove' to cancel one or more pending actions in one call. "
         "Mutating actions are batch-only and should be called at most once per "
-        "turn unless the previous call failed. System heartbeats cannot be removed."
+        "turn unless the previous call failed. The list action is read-only; do "
+        "not repeat the same list call in consecutive tool rounds. System "
+        "heartbeats cannot be removed."
     ),
     parameters={
         "action": ToolParameter(

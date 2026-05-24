@@ -302,7 +302,7 @@ def make_heartbeat_message(
 | `list` | — | 列出所有 notes（含 triggers） |
 | `remove` | `key` | 刪除 note |
 
-Runtime 規則：`agent_note` 寫入是狀態提交工具，同一 turn 最多成功呼叫一次；若同輪需要改一個或多個 note，都必須用 `batch_update`。`list` 是唯讀，不占提交額度。第二次成功後的重複寫入會被 responder 擋下並結束 tool loop，以避免無意義的 API 花費。
+Runtime 規則：`agent_note` 寫入是狀態提交工具，同一 turn 最多成功呼叫一次；若同輪需要改一個或多個 note，都必須用 `batch_update`。`list` 是唯讀，不占提交額度；但同一 turn 連續重複相同 `list` 會被 responder 擋下並結束 tool loop，以避免無意義的 API 花費與延遲。第二次成功後的重複寫入也會被擋下。
 
 ### Context 注入
 

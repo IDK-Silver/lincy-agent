@@ -47,6 +47,10 @@ from .ui_event_console import AgentUiPort
 logger = logging.getLogger(__name__)
 _PROACTIVE_SKILL_CHECK_MAX_SKILLS = 1
 _STATE_COMMIT_TOOLS = frozenset({"agent_note", "memory_edit", "schedule_action"})
+_READ_ONLY_STATE_TOOL_ACTIONS = {
+    "agent_note": frozenset({"list"}),
+    "schedule_action": frozenset({"list"}),
+}
 
 
 def _state_commit_tool_repeat_warning(tool_name: str) -> str:
@@ -56,6 +60,15 @@ def _state_commit_tool_repeat_warning(tool_name: str) -> str:
         "state commits into one call per tool per turn. Do not create unnecessary "
         "API cost by repeating state-only tool calls. list actions are read-only; "
         "mutating calls must use batch_update/requests/batch_add/batch_remove. "
+        "Stop the tool loop now unless the previous call failed."
+    )
+
+
+def _read_only_state_tool_repeat_warning(tool_name: str) -> str:
+    return (
+        f"Error: repeated read-only {tool_name} call detected. "
+        "The previous identical read-only state lookup already succeeded, "
+        "so repeating it will only add prompt tokens and delay the user. "
         "Stop the tool loop now unless the previous call failed."
     )
 
@@ -90,6 +103,13 @@ def _is_state_commit_tool_call(tool_call: ToolCall) -> bool:
     return action in {"create", "batch_update", "remove"}
 
 
+def _is_read_only_state_tool_call(tool_call: ToolCall) -> bool:
+    actions = _READ_ONLY_STATE_TOOL_ACTIONS.get(tool_call.name)
+    if actions is None:
+        return False
+    return tool_call.arguments.get("action") in actions
+
+
 def _is_successful_state_commit(tool_call: ToolCall, result: object) -> bool:
     """Return True when a state commit tool should count against the turn."""
     if not _is_state_commit_tool_call(tool_call):
@@ -108,6 +128,13 @@ def _is_successful_state_commit(tool_call: ToolCall, result: object) -> bool:
     return True
 
 
+def _is_successful_tool_result(result: object) -> bool:
+    if _is_error_tool_result(result):
+        return False
+    content = getattr(result, "content", None)
+    return not (isinstance(content, str) and content.lstrip().startswith("Error:"))
+
+
 class _StateCommitTurnTracker:
     """Track per-turn state commit tools that already succeeded."""
 
@@ -122,6 +149,28 @@ class _StateCommitTurnTracker:
     def observe_result(self, tool_call: ToolCall, result: object) -> None:
         if _is_successful_state_commit(tool_call, result):
             self._successful_tools.add(tool_call.name)
+
+
+class _ReadOnlyStateToolRepeatTracker:
+    """Stop consecutive identical read-only state lookups within one turn."""
+
+    def __init__(self) -> None:
+        self._last_signature: tuple[str, tuple[tuple[str, object], ...]] | None = None
+
+    @staticmethod
+    def _signature(tool_call: ToolCall) -> tuple[str, tuple[tuple[str, object], ...]]:
+        return (tool_call.name, tuple(sorted(tool_call.arguments.items())))
+
+    def should_block(self, tool_call: ToolCall) -> bool:
+        if not _is_read_only_state_tool_call(tool_call):
+            return False
+        return self._signature(tool_call) == self._last_signature
+
+    def observe_result(self, tool_call: ToolCall, result: object) -> None:
+        if _is_read_only_state_tool_call(tool_call) and _is_successful_tool_result(result):
+            self._last_signature = self._signature(tool_call)
+        else:
+            self._last_signature = None
 
 
 def _format_memory_edit_failure_summaries(summaries: list[str]) -> str:
@@ -544,6 +593,7 @@ def _run_responder(
     preempt_count = 0
     iterations = 0
     state_commit_tracker = _StateCommitTurnTracker()
+    read_only_state_tool_tracker = _ReadOnlyStateToolRepeatTracker()
     while response.has_tool_calls():
         iterations += 1
         if iterations > max_iterations:
@@ -569,6 +619,7 @@ def _run_responder(
 
         failed_memory_edit_this_round = False
         repeated_state_commit_this_round = False
+        repeated_read_only_state_tool_this_round = False
         memory_edit_failure_summaries: list[str] = []
         tool_results_this_round: dict[str, object] = {}
         deferred_results = _maybe_defer_tool_round_for_skills(
@@ -719,6 +770,27 @@ def _run_responder(
                 tool_results_this_round[tool_call.id] = result
                 continue
 
+            if read_only_state_tool_tracker.should_block(tool_call):
+                from ..tools.registry import ToolResult
+
+                repeated_read_only_state_tool_this_round = True
+                result = ToolResult(
+                    _read_only_state_tool_repeat_warning(tool_call.name),
+                    is_error=True,
+                )
+                console.print_warning(
+                    f"{tool_call.name} repeated the same read-only lookup; "
+                    "stopping to avoid unnecessary API cost.",
+                )
+                console.print_tool_result(tool_call, result.content)
+                conversation.add_tool_result(
+                    tool_call.id,
+                    tool_call.name,
+                    result.content,
+                )
+                tool_results_this_round[tool_call.id] = result
+                continue
+
             shell_command = tool_call.arguments.get("command")
             skip_spinner = (
                 tool_call.name == "gui_task"
@@ -738,6 +810,7 @@ def _run_responder(
             conversation.add_tool_result(tool_call.id, tool_call.name, result.content)
             tool_results_this_round[tool_call.id] = result
             state_commit_tracker.observe_result(tool_call, result)
+            read_only_state_tool_tracker.observe_result(tool_call, result)
             if turn_context is not None and turn_context.proactive_yield is not None:
                 scope_id = turn_context.proactive_yield.scope_id
                 raise ProactiveTurnYield(scope_id)
@@ -785,7 +858,7 @@ def _run_responder(
             response.tool_calls = []
             return response
 
-        if repeated_state_commit_this_round:
+        if repeated_state_commit_this_round or repeated_read_only_state_tool_this_round:
             response.content = None
             response.tool_calls = []
             return response
