@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,23 @@ def _make_fake_jwt(*, account_id: str = "acct_123", exp: int = 2_200_000_000) ->
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
     return f"{_encode(header)}.{_encode(payload)}.signature"
+
+
+def _settings_with_codex_auth(tmp_path: Path, *, account_id: str) -> CodexProxySettings:
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(account_id=account_id),
+                    "refresh_token": "refresh-token",
+                },
+            }
+        )
+    )
+    return CodexProxySettings(codex_auth_path=auth_path)
 
 
 class _AsyncResponse:
@@ -63,8 +81,19 @@ class _AsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def post(self, url: str, headers: dict, json: dict):
-        self._calls.append({"method": "POST", "url": url, "headers": headers, "json": json})
+    async def post(
+        self,
+        url: str,
+        headers: dict,
+        json: dict | None = None,
+        data: dict | None = None,
+    ):
+        call = {"method": "POST", "url": url, "headers": headers}
+        if json is not None:
+            call["json"] = json
+        if data is not None:
+            call["data"] = data
+        self._calls.append(call)
         return self._effects.pop(0)
 
 
@@ -76,7 +105,7 @@ def _patch_async_httpx(monkeypatch, effects: list[_AsyncResponse], calls: list[d
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_calls_upstream_and_parses_text(monkeypatch):
+async def test_proxy_service_calls_upstream_and_parses_text(monkeypatch, tmp_path: Path):
     sse = "\n\n".join(
         [
             'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello from codex"}]}}',
@@ -86,9 +115,7 @@ async def test_proxy_service_calls_upstream_and_parses_text(monkeypatch):
     effects = [_AsyncResponse(sse)]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_proxy")),
-    )
+    service = CodexProxyService(_settings_with_codex_auth(tmp_path, account_id="acct_proxy"))
 
     request = CodexNativeRequest(
         model="gpt-5.2-codex",
@@ -109,7 +136,66 @@ async def test_proxy_service_calls_upstream_and_parses_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_translates_tools_and_response_schema(monkeypatch):
+async def test_proxy_service_refreshes_expired_official_codex_auth(
+    monkeypatch,
+    tmp_path: Path,
+):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(
+                        account_id="acct_expired",
+                        exp=1_700_000_000,
+                    ),
+                    "refresh_token": "refresh-expired",
+                },
+            }
+        )
+    )
+    sse = "\n\n".join(
+        [
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}',
+        ]
+    )
+    effects = [
+        _AsyncResponse(
+            json.dumps(
+                {
+                    "access_token": _make_fake_jwt(account_id="acct_refreshed"),
+                    "refresh_token": "refresh-next",
+                }
+            ),
+            headers={"content-type": "application/json"},
+        ),
+        _AsyncResponse(sse),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(CodexProxySettings(codex_auth_path=auth_path))
+
+    response = await service.chat(
+        CodexNativeRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+        )
+    )
+
+    assert response.content == "ok"
+    assert calls[0]["url"] == "https://auth.openai.com/oauth/token"
+    assert calls[0]["data"]["refresh_token"] == "refresh-expired"
+    assert calls[1]["headers"]["chatgpt-account-id"] == "acct_refreshed"
+
+
+@pytest.mark.asyncio
+async def test_proxy_service_translates_tools_and_response_schema(
+    monkeypatch,
+    tmp_path: Path,
+):
     sse = "\n\n".join(
         [
             'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}',
@@ -119,9 +205,7 @@ async def test_proxy_service_translates_tools_and_response_schema(monkeypatch):
     effects = [_AsyncResponse(sse)]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_tools")),
-    )
+    service = CodexProxyService(_settings_with_codex_auth(tmp_path, account_id="acct_tools"))
     request = CodexNativeRequest(
         model="gpt-5.2-codex",
         messages=[Message(role="user", content="hi")],
@@ -148,7 +232,10 @@ async def test_proxy_service_translates_tools_and_response_schema(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_drops_max_output_tokens_for_chatgpt_backend(monkeypatch):
+async def test_proxy_service_drops_max_output_tokens_for_chatgpt_backend(
+    monkeypatch,
+    tmp_path: Path,
+):
     sse = "\n\n".join(
         [
             'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
@@ -158,9 +245,7 @@ async def test_proxy_service_drops_max_output_tokens_for_chatgpt_backend(monkeyp
     effects = [_AsyncResponse(sse)]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_tokens")),
-    )
+    service = CodexProxyService(_settings_with_codex_auth(tmp_path, account_id="acct_tokens"))
     request = CodexNativeRequest(
         model="gpt-5.4",
         messages=[Message(role="user", content="hi")],
@@ -174,7 +259,7 @@ async def test_proxy_service_drops_max_output_tokens_for_chatgpt_backend(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_forwards_prompt_cache_key(monkeypatch):
+async def test_proxy_service_forwards_prompt_cache_key(monkeypatch, tmp_path: Path):
     sse = "\n\n".join(
         [
             'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
@@ -184,9 +269,7 @@ async def test_proxy_service_forwards_prompt_cache_key(monkeypatch):
     effects = [_AsyncResponse(sse)]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_cache")),
-    )
+    service = CodexProxyService(_settings_with_codex_auth(tmp_path, account_id="acct_cache"))
     request = CodexNativeRequest(
         model="gpt-5.4",
         messages=[Message(role="user", content="hi")],
@@ -200,7 +283,10 @@ async def test_proxy_service_forwards_prompt_cache_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_replays_turn_state_within_same_turn(monkeypatch):
+async def test_proxy_service_replays_turn_state_within_same_turn(
+    monkeypatch,
+    tmp_path: Path,
+):
     sse_first = "\n\n".join(
         [
             'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}',
@@ -226,7 +312,7 @@ async def test_proxy_service_replays_turn_state_within_same_turn(monkeypatch):
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
     service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_turn_state")),
+        _settings_with_codex_auth(tmp_path, account_id="acct_turn_state")
     )
 
     first = await service.chat(
@@ -266,7 +352,10 @@ async def test_proxy_service_replays_turn_state_within_same_turn(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_proxy_service_calls_compact_endpoint_and_maps_compaction_items(monkeypatch):
+async def test_proxy_service_calls_compact_endpoint_and_maps_compaction_items(
+    monkeypatch,
+    tmp_path: Path,
+):
     effects = [
         _AsyncResponse(
             json.dumps(
@@ -284,9 +373,7 @@ async def test_proxy_service_calls_compact_endpoint_and_maps_compaction_items(mo
     ]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(
-        CodexProxySettings(access_token=_make_fake_jwt(account_id="acct_compact")),
-    )
+    service = CodexProxyService(_settings_with_codex_auth(tmp_path, account_id="acct_compact"))
 
     response = await service.compact(
         CodexCompactRequest(

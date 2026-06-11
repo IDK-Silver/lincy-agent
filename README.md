@@ -60,20 +60,17 @@ uv run claude-code-proxy
 
 `claude-code-proxy login` 預設走 browser OAuth，瀏覽器授權後把 Anthropic 顯示的 `code#state` 貼回 terminal。只有在你明確使用 `--from-claude-code`，或額外啟用 fallback 時，proxy 才會去讀 Claude Code credentials / macOS Keychain。
 
-如果要使用 Codex provider，`codex-proxy` 現在和 `claude-code-proxy` 一樣，預設自己走 browser OAuth：
+如果要使用 Codex provider，先用官方 Codex CLI 登入，讓 `~/.codex/auth.json` 存在。`codex-proxy` 只讀這個預設 auth 檔，不維護自己的 token store：
 
 ```bash
-# Browser OAuth login (preferred)
-uv run codex-proxy login
-
-# Or import an existing official Codex login state
-uv run codex-proxy login --from-codex
+# Official Codex CLI login
+codex login
 
 # Start the Codex proxy on http://127.0.0.1:4143
 uv run codex-proxy
 ```
 
-`codex-proxy login` 會開瀏覽器，並在本機 `http://localhost:1455/auth/callback` 等待 OAuth callback。只有在你明確使用 `--from-codex`，或額外啟用 fallback 時，proxy 才會去讀 `~/.codex/auth.json`。如果你只想手動單獨測 Codex，可以把 `cfgs/agent.yaml` 裡對應 agent 的 `llm` 路徑切到：
+`codex-proxy` 啟動後會固定讀 `~/.codex/auth.json`；若 access token 過期，會用檔案內的 refresh token 在記憶體中更新本次 proxy process 的 token，不會改寫官方 auth 檔。如果你只想手動單獨測 Codex，可以把 `cfgs/agent.yaml` 裡對應 agent 的 `llm` 路徑切到：
 
 - `cfgs/llm/codex/gpt-5.4/no-thinking.yaml` 或 `cfgs/llm/codex/gpt-5.4/thinking.yaml`
 - `cfgs/llm/codex/gpt-5.4-mini/no-thinking.yaml` 或 `cfgs/llm/codex/gpt-5.4-mini/thinking.yaml`

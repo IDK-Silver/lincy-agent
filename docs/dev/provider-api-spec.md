@@ -125,9 +125,9 @@
 |------|------|-----------|
 | 對內 API | `CodexClient` 只打本專案 native proxy `POST /chat` | `src/chat_agent/llm/providers/codex.py` |
 | 對內 request 格式 | `CodexNativeRequest` 顯式攜帶 `messages`, `tools`, `response_schema`, `reasoning_effort` | `src/chat_agent/llm/schema.py` |
-| 本地登入 | `uv run codex-proxy login` 預設走 browser OAuth；`uv run codex-proxy login --from-codex` 才匯入官方 `~/.codex/auth.json` | `src/codex_proxy/__main__.py` + `src/codex_proxy/auth.py` |
-| Browser OAuth callback | 本地 callback server 固定等 `http://localhost:1455/auth/callback` | `src/codex_proxy/auth.py` |
-| Token 來源順序 | 先讀 `CODEX_PROXY_ACCESS_TOKEN`，再讀本專案 token store；只有顯式啟用 fallback 時才讀 `~/.codex/auth.json`；refresh 後只寫本專案 token store | `src/codex_proxy/service.py` + `src/codex_proxy/auth.py` |
+| 本地登入 | 使用官方 `codex login` 建立 `~/.codex/auth.json`；本專案 `codex-proxy` 不再提供自己的 login flow | `src/codex_proxy/__main__.py` + `src/codex_proxy/auth.py` |
+| Auth 檔路徑 | proxy 固定讀官方預設 `~/.codex/auth.json`，不再讀 `CODEX_PROXY_CODEX_AUTH_PATH` 或本專案 token store | `src/codex_proxy/settings.py` + `src/codex_proxy/auth.py` |
+| Token 來源順序 | 只讀官方 Codex auth 檔；若 access token 過期，使用同檔 refresh token 在記憶體 refresh，本專案不改寫官方 auth 檔 | `src/codex_proxy/service.py` + `src/codex_proxy/auth.py` |
 | 上游 endpoint | proxy 固定轉送到 `/codex/responses` | `src/codex_proxy/service.py` |
 | `max_output_tokens` 處理 | native request 保留欄位，但 proxy 不會轉送到 ChatGPT backend，因為實測會回 `400 Unsupported parameter: max_output_tokens` | `src/codex_proxy/service.py` |
 | Prompt cache key | app 組裝層對 `codex` 產生 request-level `prompt_cache_key`；key 基底跟官方 CLI 一樣用 session / conversation 概念，再額外加 agent namespace 與本地 TTL bucket，讓 `agent.yaml` 的 `cache.ttl` 不會被 silent ignore | `src/chat_agent/cli/app.py` + `src/chat_agent/llm/providers/codex.py` + `src/codex_proxy/service.py` |

@@ -24,12 +24,10 @@ from chat_agent.llm.schema import (
 
 from .auth import (
     CodexAuthLoader,
-    CodexTokenStore,
     StoredCodexToken,
     extract_chatgpt_account_id,
     extract_token_expiry,
     is_token_fresh,
-    normalize_bearer_token,
 )
 from .settings import CodexProxySettings
 
@@ -90,55 +88,35 @@ class _CodexTurnStateStore:
 
 
 class CodexTokenManager:
-    """Load, cache, and refresh Codex OAuth tokens."""
+    """Load and refresh the official Codex CLI OAuth token."""
 
     def __init__(self, settings: CodexProxySettings):
         self._settings = settings
-        self._token_store = CodexTokenStore(settings.token_path)
         self._codex_auth = CodexAuthLoader(path=settings.codex_auth_path)
         self._token: StoredCodexToken | None = None
         self._lock = anyio.Lock()
 
     async def get_token(self) -> StoredCodexToken:
-        if self._settings.access_token:
-            return self._build_env_token(self._settings.access_token)
-
         async with self._lock:
             if self._token is not None and is_token_fresh(self._token):
                 return self._token
 
             errors: list[str] = []
-            stored = self._load_store(errors)
-            if stored is not None and is_token_fresh(stored):
-                return self._cache_and_return(stored)
-
-            if stored is not None and stored.refresh_token:
-                try:
-                    refreshed = await self._refresh(stored.refresh_token)
-                    self._token_store.save(refreshed)
-                    return self._cache_and_return(refreshed)
-                except Exception as exc:
-                    errors.append(f"stored refresh failed: {exc}")
-
             imported = self._load_codex_auth(errors)
             if imported is not None and is_token_fresh(imported):
-                self._token_store.save(imported)
                 return self._cache_and_return(imported)
 
             if imported is not None and imported.refresh_token:
                 try:
                     refreshed = await self._refresh(imported.refresh_token)
-                    self._token_store.save(refreshed)
                     return self._cache_and_return(refreshed)
                 except Exception as exc:
                     errors.append(f"codex auth refresh failed: {exc}")
 
             detail = "; ".join(errors) if errors else "no token source available"
             raise RuntimeError(
-                "Codex OAuth token is required. Set CODEX_PROXY_ACCESS_TOKEN, "
-                "run `uv run codex-proxy login`, run "
-                "`uv run codex-proxy login --from-codex`, "
-                "or enable Codex auth fallback. "
+                "Codex OAuth token is required. Run `codex login` so the "
+                f"default auth file exists at {self._settings.codex_auth_path}. "
                 f"({detail})"
             )
 
@@ -146,28 +124,7 @@ class CodexTokenManager:
         self._token = token
         return token
 
-    def _build_env_token(self, token: str) -> StoredCodexToken:
-        access_token = normalize_bearer_token(token)
-        return StoredCodexToken(
-            access_token=access_token,
-            refresh_token=None,
-            account_id=extract_chatgpt_account_id(access_token),
-            expires_at=extract_token_expiry(access_token),
-            source="env_override",
-            client_id=self._settings.oauth_client_id,
-            created_at=datetime.now(tz=UTC),
-        )
-
-    def _load_store(self, errors: list[str]) -> StoredCodexToken | None:
-        try:
-            return self._token_store.load()
-        except ValueError as exc:
-            errors.append(str(exc))
-            return None
-
     def _load_codex_auth(self, errors: list[str]) -> StoredCodexToken | None:
-        if not self._settings.allow_codex_auth_fallback:
-            return None
         try:
             return self._codex_auth.load()
         except ValueError as exc:
