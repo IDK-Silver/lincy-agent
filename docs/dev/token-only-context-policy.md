@@ -24,6 +24,7 @@
 
 - 對啟用 `cache_ttl: 1h` 的正常 brain request，當同一輪 prompt 在 tool loop / rebuild 中重送時，prompt cache hit 應維持在 **90% 以上**
 - 若實測長 prompt 常落到明顯低於 90%（例如 0% / 14% / 50%），視為 runtime regression，不是可接受噪音
+- conversation-tier 的兩個 breakpoint 固定用「上一個 user turn」與「本輪最新 user turn」；不要在跨 turn 時直接跳到上一輪 final assistant，否則上一輪長工具回合沒有既有 cache endpoint，下一輪第一個 request 會大幅 miss
 - 例外只限於：
   - 第一次冷 cache
   - 本輪最新 user turn 本身被刻意改寫

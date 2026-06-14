@@ -469,7 +469,7 @@ class ContextBuilder:
         kept_conv: list[Message],
         cache_ctrl: dict[str, str],
     ) -> list[Message]:
-        """Inject BP3: mark last eligible message before current turn for caching.
+        """Inject BP3: keep the previous user turn as the reusable cache endpoint.
 
         Sets ``Message.cache_control`` on the target message.  Content type
         is never changed — the provider adapter reads ``cache_control`` during
@@ -485,31 +485,45 @@ class ContextBuilder:
         if last_user_pos is None or last_user_pos == 0:
             return kept_conv
 
-        # Walk backwards to find an eligible message for cache breakpoint.
+        # Prefer the previous user turn.  The responder will add the latest
+        # user turn as a second conversation breakpoint.  Keeping the previous
+        # user endpoint stable avoids a cold read after tool-heavy turns, where
+        # the previous final assistant was not itself a cached endpoint.
         for i in range(last_user_pos - 1, -1, -1):
             msg = kept_conv[i]
-            if msg.role == "system":
+            if msg.role != "user":
                 continue
-            if msg.role == "tool":
-                continue
-            if msg.role == "assistant" and msg.tool_calls:
-                continue
-            if not isinstance(msg.content, str) or not msg.content:
-                continue
-            # Set cache_control on the message (metadata only, content unchanged)
-            kept_conv = list(kept_conv)
-            kept_conv[i] = Message(
-                role=msg.role,
-                content=msg.content,
-                reasoning_content=msg.reasoning_content,
-                reasoning_details=msg.reasoning_details,
-                tool_calls=msg.tool_calls,
-                tool_call_id=msg.tool_call_id,
-                name=msg.name,
-                timestamp=msg.timestamp,
-                cache_control=cache_ctrl,
-            )
-            break
+            if isinstance(msg.content, str) and msg.content:
+                break
+        else:
+            # Fallback for non-standard histories without an earlier user turn.
+            for i in range(last_user_pos - 1, -1, -1):
+                msg = kept_conv[i]
+                if msg.role == "system":
+                    continue
+                if msg.role == "tool":
+                    continue
+                if msg.role == "assistant" and msg.tool_calls:
+                    continue
+                if not isinstance(msg.content, str) or not msg.content:
+                    continue
+                break
+            else:
+                return kept_conv
+
+        # Set cache_control on the message (metadata only, content unchanged)
+        kept_conv = list(kept_conv)
+        kept_conv[i] = Message(
+            role=msg.role,
+            content=msg.content,
+            reasoning_content=msg.reasoning_content,
+            reasoning_details=msg.reasoning_details,
+            tool_calls=msg.tool_calls,
+            tool_call_id=msg.tool_call_id,
+            name=msg.name,
+            timestamp=msg.timestamp,
+            cache_control=cache_ctrl,
+        )
 
         return kept_conv
 

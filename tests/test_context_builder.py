@@ -121,7 +121,7 @@ def test_cache_control_applied_to_system_and_conversation_breakpoint():
     assert cache_breakpoint_found
 
 
-def test_builder_cache_breakpoint_stays_before_current_turn_after_tool_round():
+def test_builder_cache_breakpoint_uses_previous_user_endpoint_after_tool_round():
     builder = ContextBuilder(system_prompt="Hello world", cache_ttl="1h")
     conv = Conversation()
     conv.add("user", "u1")
@@ -141,9 +141,36 @@ def test_builder_cache_breakpoint_stays_before_current_turn_after_tool_round():
         if msg.role in {"user", "assistant"}
         and msg.cache_control == {"type": "ephemeral", "ttl": "1h"}
     )
-    assert breakpoint_msg.role == "assistant"
+    assert breakpoint_msg.role == "user"
     assert isinstance(breakpoint_msg.content, str)
-    assert "a1" in breakpoint_msg.content
+    assert "u1" in breakpoint_msg.content
+
+
+def test_builder_cache_breakpoint_keeps_previous_user_across_turn_boundary():
+    builder = ContextBuilder(system_prompt="Hello world", cache_ttl="1h")
+    conv = Conversation()
+    conv.add("user", "u1")
+    conv.add("assistant", "a1")
+    conv.add("user", "u2")
+    conv.add_assistant_with_tools(
+        None,
+        [ToolCall(id="t1", name="dummy", arguments={})],
+    )
+    conv.add_tool_result("t1", "dummy", "large tool output")
+    conv.add("assistant", "a2 final")
+    conv.add("user", "u3")
+
+    messages = builder.build(conv)
+
+    breakpoint_msg = next(
+        msg
+        for msg in messages
+        if msg.role in {"user", "assistant"}
+        and msg.cache_control == {"type": "ephemeral", "ttl": "1h"}
+    )
+    assert breakpoint_msg.role == "user"
+    assert isinstance(breakpoint_msg.content, str)
+    assert "u2" in breakpoint_msg.content
 
 
 def test_import_render_cache_accepts_matching_sources():
