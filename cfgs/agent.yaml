@@ -163,6 +163,7 @@ tools:
     task_max_concurrency: 2
     export_env: # keys from .env to inject into shell subprocess
       - LITELLM_API_KEY
+      - OPENROUTER_API_KEY
     handoff:
       enabled: true
       tail_lines: 8 # inspect the last N output lines
