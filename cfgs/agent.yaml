@@ -300,9 +300,7 @@ agents:
 
   vision:
     enabled: true
-    llm: cfgs/llm/ollama/gemini-3-flash-preview-cloud/no-thinking.yaml
-    llm_fallbacks:
-      - cfgs/llm/openrouter/google-gemini-3-flash-preview/no-thinking.yaml
+    llm: cfgs/llm/openrouter/google-gemini-3-flash-preview/no-thinking.yaml
     llm_request_timeout: 60
     llm_transient_retries: 1
     warn_on_failure: true
@@ -371,9 +369,7 @@ agents:
 
   gui_worker:
     enabled: true
-    llm: cfgs/llm/ollama/gemini-3-flash-preview-cloud/no-thinking.yaml
-    llm_fallbacks:
-      - cfgs/llm/openrouter/google-gemini-3-flash-preview/no-thinking.yaml
+    llm: cfgs/llm/openrouter/google-gemini-3-flash-preview/no-thinking.yaml
     llm_request_timeout: 60
     llm_transient_retries: 1
     warn_on_failure: true

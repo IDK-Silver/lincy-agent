@@ -21,13 +21,15 @@ from .schema import LLMResponse, Message, ToolDefinition
 
 logger = logging.getLogger(__name__)
 
-_QUOTA_ERROR_PATTERNS = (
+_FAILOVER_ERROR_PATTERNS = (
     re.compile(r"rate.?limit", re.IGNORECASE),
     re.compile(r"quota", re.IGNORECASE),
     re.compile(r"usage limit", re.IGNORECASE),
     re.compile(r"too many requests", re.IGNORECASE),
     re.compile(r"capacity", re.IGNORECASE),
     re.compile(r"overloaded", re.IGNORECASE),
+    re.compile(r"requires? .{0,40}subscription", re.IGNORECASE),
+    re.compile(r"upgrade .{0,40}access", re.IGNORECASE),
 )
 
 
@@ -177,7 +179,7 @@ def _should_failover(exc: Exception) -> bool:
         return False
 
     detail = _extract_http_error_detail(exc)
-    return any(pattern.search(detail) for pattern in _QUOTA_ERROR_PATTERNS)
+    return any(pattern.search(detail) for pattern in _FAILOVER_ERROR_PATTERNS)
 
 
 def _format_error(exc: Exception) -> str:

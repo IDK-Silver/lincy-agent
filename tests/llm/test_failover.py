@@ -123,6 +123,32 @@ def test_failover_uses_secondary_after_529():
     assert fallback.tool_calls_count == 1
 
 
+def test_failover_uses_secondary_after_subscription_entitlement_error():
+    primary = _StubClient(
+        chat_effects=[
+            _make_status(
+                403,
+                '{"error":"this model requires a subscription, upgrade for access"}',
+            )
+        ],
+    )
+    fallback = _StubClient(chat_effects=["ok"])
+    client = with_llm_failover(
+        [
+            FailoverCandidate("ollama-primary", "primary", primary),
+            FailoverCandidate("openrouter-fallback", "fallback", fallback),
+        ],
+        cooldown_seconds=1800,
+        label="vision",
+    )
+
+    result = client.chat([Message(role="user", content="hi")])
+
+    assert result == "ok"
+    assert primary.chat_calls == 1
+    assert fallback.chat_calls == 1
+
+
 def test_failover_skips_cooled_primary_when_alternative_exists():
     primary_one = _StubClient(
         tool_effects=[_make_429()],
@@ -188,6 +214,29 @@ def test_failover_does_not_switch_on_request_format_error():
 
     assert primary.tool_calls_count == 1
     assert fallback.tool_calls_count == 0
+
+
+def test_failover_does_not_switch_on_auth_error():
+    primary = _StubClient(
+        chat_effects=[
+            _make_status(403, '{"error":"invalid api key"}')
+        ],
+    )
+    fallback = _StubClient(chat_effects=["should-not-run"])
+    client = with_llm_failover(
+        [
+            FailoverCandidate("primary", "primary", primary),
+            FailoverCandidate("fallback", "fallback", fallback),
+        ],
+        cooldown_seconds=1800,
+        label="vision",
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.chat([Message(role="user", content="hi")])
+
+    assert primary.chat_calls == 1
+    assert fallback.chat_calls == 0
 
 
 def test_failover_key_shares_quota_bucket_across_models():
