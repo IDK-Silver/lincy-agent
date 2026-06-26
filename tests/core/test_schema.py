@@ -92,6 +92,46 @@ def test_discord_channel_config_defaults():
     assert discord_cfg.presence_idle_after_seconds == 300
 
 
+def test_web_channel_config_defaults_and_override():
+    config = AppConfig.model_validate(
+        {
+            "channels": {
+                "web": {
+                    "enabled": True,
+                    "history_limit": 50,
+                }
+            },
+            "agents": {
+                "brain": {
+                    "llm": _ollama_llm(),
+                }
+            },
+        }
+    )
+
+    assert config.channels.web.enabled is True
+    assert config.channels.web.history_limit == 50
+
+
+def test_web_channel_config_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "channels": {
+                    "web": {
+                        "enabled": True,
+                        "unknown": True,
+                    }
+                },
+                "agents": {
+                    "brain": {
+                        "llm": _ollama_llm(),
+                    }
+                },
+            }
+        )
+
+
 def test_context_config_boot_files_include_builtin_skills_index():
     config = AppConfig.model_validate(
         {

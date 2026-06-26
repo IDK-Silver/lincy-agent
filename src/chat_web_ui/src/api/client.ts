@@ -1,5 +1,15 @@
 const BASE = ''
 
+export interface WebChatEvent {
+  id: string
+  created_at: string
+  kind: 'message' | 'status' | 'error'
+  role: 'user' | 'assistant' | 'system' | null
+  content: string | null
+  status: 'queued' | 'processing' | 'idle' | 'error' | null
+  request_id: string | null
+}
+
 export async function fetchDashboard(from: string, to: string) {
   const res = await fetch(`${BASE}/api/dashboard?from=${from}&to=${to}`)
   return res.json()
@@ -23,4 +33,27 @@ export async function fetchAllRequests(from: string, to: string, limit = 200, of
 export async function fetchLiveStatus() {
   const res = await fetch(`${BASE}/api/live`)
   return res.json()
+}
+
+async function responseJsonOrError(res: Response) {
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    const message = typeof data.error === 'string' ? data.error : 'request failed'
+    throw new Error(message)
+  }
+  return data
+}
+
+export async function fetchChatEvents(limit = 200): Promise<{ events: WebChatEvent[] }> {
+  const res = await fetch(`${BASE}/api/chat/events?limit=${limit}`)
+  return responseJsonOrError(res)
+}
+
+export async function sendChatMessage(content: string): Promise<{ event: WebChatEvent }> {
+  const res = await fetch(`${BASE}/api/chat/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+  return responseJsonOrError(res)
 }

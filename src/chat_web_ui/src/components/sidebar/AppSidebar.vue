@@ -3,9 +3,16 @@ import { useRoute } from 'vue-router'
 
 const route = useRoute()
 
-const navItems = [
+interface NavItem {
+  name: string
+  path: string
+  enabled: boolean
+  label?: string
+}
+
+const navItems: NavItem[] = [
   { name: 'Monitor', path: '/monitor', enabled: true },
-  { name: 'Chat', path: '/chat', enabled: false, label: 'coming soon' },
+  { name: 'Chat', path: '/chat', enabled: true },
   { name: 'Settings', path: '/settings', enabled: false },
 ]
 </script>

@@ -73,6 +73,7 @@ features:
         - channel: cli
         - channel: gmail
         - channel: line
+        - channel: web
         - channel: discord
           metadata_equals:
             source: dm_immediate
@@ -96,6 +97,9 @@ features:
 
 # Channel adapters
 channels:
+  web:
+    enabled: true
+    history_limit: 200
   gmail:
     enabled: true
     poll_interval: 5 # seconds between inbox polls

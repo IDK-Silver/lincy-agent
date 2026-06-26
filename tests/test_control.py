@@ -4,6 +4,7 @@ import pytest
 import httpx
 
 from chat_agent import control
+from chat_agent.agent.web_chat import WebChatEvent
 from chat_agent.control import create_app
 
 
@@ -96,6 +97,53 @@ async def test_reload_returns_404_when_unavailable():
         resp = await client.post("/reload")
     assert resp.status_code == 404
     assert resp.json() == {"error": "reload is not supported"}
+
+
+@pytest.mark.asyncio
+async def test_web_chat_message_calls_submit_fn():
+    called = []
+
+    def submit(content: str) -> WebChatEvent:
+        called.append(content)
+        return WebChatEvent(
+            kind="message",
+            role="user",
+            content=content,
+            request_id="r1",
+        )
+
+    app = create_app(shutdown_fn=lambda: None, web_chat_submit_fn=submit)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/web-chat/messages", json={"content": " hello "})
+
+    assert resp.status_code == 202
+    payload = resp.json()
+    assert payload["event"]["content"] == "hello"
+    assert payload["event"]["request_id"] == "r1"
+    assert called == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_web_chat_message_rejects_blank_content():
+    app = create_app(shutdown_fn=lambda: None, web_chat_submit_fn=lambda _c: None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/web-chat/messages", json={"content": "   "})
+
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "content is required"}
+
+
+@pytest.mark.asyncio
+async def test_web_chat_message_returns_503_when_unavailable():
+    app = create_app(shutdown_fn=lambda: None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/web-chat/messages", json={"content": "hello"})
+
+    assert resp.status_code == 503
+    assert resp.json() == {"error": "web chat is not available"}
 
 
 def test_assert_control_slot_available_detects_existing_chat_cli(monkeypatch):

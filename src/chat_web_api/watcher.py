@@ -9,6 +9,8 @@ from pathlib import Path
 
 from watchfiles import awatch
 
+from chat_agent.agent.web_chat import WebChatStore
+
 from .cache import MetricsCache
 
 logger = logging.getLogger(__name__)
@@ -75,3 +77,32 @@ async def watch_sessions(
                             "hard_limit": live["hard_limit"],
                         }
                     )
+
+
+async def watch_web_chat_events(
+    events_path: Path,
+    broadcast: Callable[[dict], Awaitable[None]],
+    stop_event: asyncio.Event,
+) -> None:
+    """Watch the Web Chat JSONL event log and broadcast newly appended events."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    store = WebChatStore(events_path)
+    offset = events_path.stat().st_size if events_path.exists() else 0
+
+    logger.info("Watching Web Chat events: %s", events_path)
+    async for changes in awatch(events_path.parent, stop_event=stop_event):
+        changed = any(Path(path_str) == events_path for _change_type, path_str in changes)
+        if not changed:
+            continue
+        try:
+            events, offset = store.read_from_offset(offset)
+        except Exception:
+            logger.warning("Error reading Web Chat events", exc_info=True)
+            continue
+        for event in events:
+            await broadcast(
+                {
+                    "type": "chat_event",
+                    "event": event.model_dump(mode="json"),
+                }
+            )

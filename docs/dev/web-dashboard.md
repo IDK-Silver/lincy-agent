@@ -1,6 +1,6 @@
 # Web Dashboard（chat_web_api + chat_web_ui）
 
-監控 dashboard，即時顯示 token 用量、成本、read cache rate。未來承載線上 chat 介面。
+監控 dashboard，即時顯示 token 用量、成本、read cache rate，並提供本機 Web Chat 介面。
 
 ## 架構
 
@@ -14,6 +14,14 @@ Browser → uvicorn (:9002) → FastAPI (chat_web_api)
 
 資料流：JSONL append → watchfiles 偵測 → incremental read → cache 更新 → WebSocket push → Vue reactive 更新
 
+Web Chat 資料流：
+
+```
+Browser → chat_web_api /api/chat/messages → chat-cli control API
+        → WebAdapter → AgentCore queue → send_message(channel="web")
+        → WebAdapter → state/web_chat/events.jsonl → chat_web_api /ws
+```
+
 ## 後端 (`src/chat_web_api/`)
 
 | 檔案 | 職責 |
@@ -25,6 +33,8 @@ Browser → uvicorn (:9002) → FastAPI (chat_web_api)
 | `watcher.py` | `watchfiles.awatch()` 監控 session 目錄變動 |
 | `app.py` | FastAPI factory：REST + WebSocket + 靜態檔 serving |
 
+Web Chat 事件模型與 JSONL store 位於 `src/chat_agent/agent/web_chat.py`，adapter 位於 `src/chat_agent/agent/adapters/web.py`。事件檔固定在 `agent_os_dir/state/web_chat/events.jsonl`。
+
 ### API Endpoints
 
 | Method | Path | 說明 |
@@ -34,7 +44,15 @@ Browser → uvicorn (:9002) → FastAPI (chat_web_api)
 | GET | `/api/sessions/{id}` | Session 細節：turns + per-request breakdown |
 | GET | `/api/requests?from=&to=&limit=&offset=` | 跨 session 的全域 request log |
 | GET | `/api/live` | 當前 active session 的 token 位置 |
+| GET | `/api/chat/events?limit=` | Web Chat 最近事件 |
+| POST | `/api/chat/messages` | 轉送本機 Web Chat 訊息到 chat-cli control API |
 | WS | `/ws` | 即時推送：`session_updated`、`live_token_update`、`session_created` |
+
+WebSocket 另會推送 `chat_event`：
+
+```json
+{"type": "chat_event", "event": {"id": "...", "kind": "message", "role": "assistant"}}
+```
 
 ### Token 計費邏輯
 
@@ -67,7 +85,7 @@ Tech stack：Vue 3 + Vite + Bun + shadcn-vue + Tailwind CSS + Chart.js
 | `/monitor` | MonitorDashboard | 總覽：summary cards + 圖表 + sessions 表格 |
 | `/monitor/requests` | MonitorRequests | 跨 session request log，按 session 分組 |
 | `/monitor/:id` | MonitorSession | 單一 session：turn timeline + expandable responses |
-| `/chat` | ChatPlaceholder | 預留 |
+| `/chat` | ChatPage | 本機 Web Chat：訊息列表 + composer |
 | `/settings` | SettingsPlaceholder | 預留 |
 
 Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
@@ -106,6 +124,7 @@ Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
 - `stores/websocket.ts`：singleton WebSocket，3 秒自動重連
 - `stores/live.ts`：active session token 位置，WebSocket `live_token_update` 更新
 - `stores/dashboard.ts`：收到 `session_updated` / `session_created` 時自動 refresh
+- `stores/chat.ts`：載入 `/api/chat/events`，送出 `/api/chat/messages`，收到 `chat_event` 時 dedupe 後追加
 
 ## Supervisor 整合
 
@@ -145,6 +164,9 @@ Production 模式由 `chat-web-api` 直接 serve `dist/` 靜態檔。
 
 ## 注意事項
 
+- Web Chat v1 是本機單使用者介面，信任 loopback service，不做登入、附件與 token streaming。
+- Web Chat 可見回覆仍必須由模型透過 `send_message(channel="web")` 送出；一般 assistant text 只視為內部思考/console 顯示。
+- `channels.web.enabled` 控制 chat-cli 是否註冊 WebAdapter；`channels.web.history_limit` 控制前端預設讀取筆數。
 - `requests.jsonl` 含完整 message payload，**不要全部載入 cache**，日後做 lazy load
 - `read_cache_rate = cache_read_tokens / prompt_tokens`
 - `write_cache` 和 `read_cache_rate` 分開顯示

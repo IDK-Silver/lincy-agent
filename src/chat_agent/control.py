@@ -13,6 +13,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import httpx
 import uvicorn
+from pydantic import ValidationError
+
+from .agent.web_chat import WebChatEvent, WebChatMessageRequest
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ def create_app(
     shutdown_fn: Callable[[], None],
     new_session_fn: Callable[[], None] | None = None,
     reload_fn: Callable[[], None] | None = None,
+    web_chat_submit_fn: Callable[[str], WebChatEvent] | None = None,
 ) -> FastAPI:
     """Build FastAPI app with shutdown/health endpoints."""
     app = FastAPI(title="chat-agent-control", docs_url=None, redoc_url=None)
@@ -108,6 +112,29 @@ def create_app(
         reload_fn()
         return JSONResponse({"status": "reload_requested"})
 
+    @app.post("/web-chat/messages")
+    def web_chat_message(request: WebChatMessageRequest) -> JSONResponse:
+        text = request.content.strip()
+        if not text:
+            return JSONResponse({"error": "content is required"}, status_code=400)
+        if web_chat_submit_fn is None:
+            return JSONResponse(
+                {"error": "web chat is not available"},
+                status_code=503,
+            )
+        try:
+            event = web_chat_submit_fn(text)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        except ValidationError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(
+            {"event": event.model_dump(mode="json")},
+            status_code=202,
+        )
+
     return app
 
 
@@ -121,6 +148,7 @@ class ControlServer:
         shutdown_fn: Callable[[], None],
         new_session_fn: Callable[[], None] | None = None,
         reload_fn: Callable[[], None] | None = None,
+        web_chat_submit_fn: Callable[[str], WebChatEvent] | None = None,
     ):
         self._host = host
         self._port = port
@@ -128,6 +156,7 @@ class ControlServer:
             shutdown_fn,
             new_session_fn=new_session_fn,
             reload_fn=reload_fn,
+            web_chat_submit_fn=web_chat_submit_fn,
         )
         self._thread: threading.Thread | None = None
 

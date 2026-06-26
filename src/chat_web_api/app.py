@@ -8,16 +8,40 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
+import httpx
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+from chat_agent.agent.web_chat import WebChatMessageRequest, WebChatStore
 
 from .cache import MetricsCache
 from .pricing import fetch_pricing
 from .settings import WebApiSettings
-from .watcher import watch_sessions
+from .watcher import watch_sessions, watch_web_chat_events
 
 logger = logging.getLogger(__name__)
+
+
+async def _post_web_chat_message_to_control(
+    settings: WebApiSettings,
+    text: str,
+) -> tuple[int, dict]:
+    """Forward one Web Chat message to chat-cli's control API."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{settings.control_base_url}/web-chat/messages",
+                json={"content": text},
+            )
+    except httpx.RequestError:
+        return 503, {"error": "chat-cli control API is unavailable"}
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {"error": response.text or "invalid control API response"}
+    return response.status_code, payload
 
 
 class _WebSocketManager:
@@ -48,6 +72,7 @@ def create_app(settings: WebApiSettings) -> FastAPI:
     ws_manager = _WebSocketManager()
     cache_holder: dict[str, MetricsCache] = {}
     watcher_stop = asyncio.Event()
+    chat_store = WebChatStore(settings.web_chat_events_path)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
@@ -74,14 +99,22 @@ def create_app(settings: WebApiSettings) -> FastAPI:
                 soft_limit=settings.soft_limit_tokens,
             )
         )
+        chat_watcher_task = asyncio.create_task(
+            watch_web_chat_events(
+                settings.web_chat_events_path,
+                ws_manager.broadcast,
+                watcher_stop,
+            )
+        )
         yield
         # Shutdown
         watcher_stop.set()
-        watcher_task.cancel()
-        try:
-            await watcher_task
-        except asyncio.CancelledError:
-            pass
+        for task in (watcher_task, chat_watcher_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="chat-web-api", docs_url=None, redoc_url=None, lifespan=lifespan)
 
@@ -186,6 +219,24 @@ def create_app(settings: WebApiSettings) -> FastAPI:
         if status is None:
             return {"active": False}
         return status
+
+    @app.get("/api/chat/events")
+    async def chat_events(limit: int = Query(200, ge=1, le=1000)) -> dict:
+        return {
+            "events": [
+                event.model_dump(mode="json")
+                for event in chat_store.recent_events(limit)
+            ]
+        }
+
+    @app.post("/api/chat/messages")
+    async def chat_message(request: WebChatMessageRequest) -> JSONResponse:
+        text = request.content.strip()
+        if not text:
+            return JSONResponse({"error": "content is required"}, status_code=400)
+
+        status_code, payload = await _post_web_chat_message_to_control(settings, text)
+        return JSONResponse(payload, status_code=status_code)
 
     # --- WebSocket ---
 

@@ -1387,11 +1387,19 @@ class DiscordChannelConfig(StrictConfigModel):
         return self
 
 
+class WebChannelConfig(StrictConfigModel):
+    """Local Web Chat adapter settings."""
+
+    enabled: bool = False
+    history_limit: int = Field(default=200, ge=1, le=1000)
+
+
 class ChannelsConfig(StrictConfigModel):
     """Channel adapter configuration."""
 
     gmail: GmailChannelConfig = Field(default_factory=GmailChannelConfig)
     discord: DiscordChannelConfig = Field(default_factory=DiscordChannelConfig)
+    web: WebChannelConfig = Field(default_factory=WebChannelConfig)
 
     @model_validator(mode="before")
     @classmethod

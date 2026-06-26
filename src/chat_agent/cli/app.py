@@ -885,6 +885,18 @@ def main(user: str, resume: str | None = None) -> None:
     )
     agent.register_adapter(cli_adapter)
 
+    web_adapter = None
+    if config.channels.web.enabled:
+        from ..agent.adapters.web import WebAdapter
+
+        web_adapter = WebAdapter(
+            events_path=agent_os_dir / "state" / "web_chat" / "events.jsonl",
+            history_limit=config.channels.web.history_limit,
+        )
+        agent.register_adapter(web_adapter)
+        if debug:
+            console.print_debug("web", "Web Chat adapter registered")
+
     if gmail_adapter is not None:
         agent.register_adapter(gmail_adapter)
         if debug:
@@ -1097,6 +1109,9 @@ def main(user: str, resume: str | None = None) -> None:
             shutdown_fn=_shutdown_from_control,
             new_session_fn=agent.request_new_session,
             reload_fn=agent.request_reload,
+            web_chat_submit_fn=(
+                web_adapter.submit_message if web_adapter is not None else None
+            ),
         )
         control_server.start()
 
