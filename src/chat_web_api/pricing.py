@@ -84,7 +84,9 @@ def builtin_pricing_overrides() -> dict[str, ModelPricing]:
 
 def _apply_builtin_overrides(pricing: dict[str, ModelPricing]) -> dict[str, ModelPricing]:
     merged = dict(pricing)
-    merged.update(builtin_pricing_overrides())
+    for key, override in builtin_pricing_overrides().items():
+        if key not in merged:
+            merged[key] = override
     return merged
 
 
