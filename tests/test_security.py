@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pytest
 
 from chat_agent.tools.security import is_path_allowed
 

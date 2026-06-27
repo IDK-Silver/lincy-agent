@@ -36,7 +36,7 @@ class MigrationResult:
         if not self.upgraded:
             return ""
         lines = [
-            f"[STARTUP after upgrade]",
+            "[STARTUP after upgrade]",
             f"version: {self.old_version} -> {self.new_version}",
         ]
         if self.summaries:

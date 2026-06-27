@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from chat_agent.agent.core import _run_responder
 from chat_agent.context.conversation import Conversation
 from chat_agent.llm.schema import LLMResponse, Message, ToolCall
-from chat_agent.tools.registry import ToolRegistry, ToolResult
+from chat_agent.tools.registry import ToolRegistry
 
 
 class _Client:

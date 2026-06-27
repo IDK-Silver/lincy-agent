@@ -1,6 +1,6 @@
 """Retry wrapper for transient LLM client failures."""
 
-from datetime import datetime, timezone
+from datetime import timezone
 
 from ..timezone_utils import now as tz_now
 from email.utils import parsedate_to_datetime

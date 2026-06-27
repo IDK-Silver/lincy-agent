@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from ...core.schema import ShellHandoffConfig
 from ...llm.schema import ToolDefinition, ToolParameter
@@ -18,10 +18,6 @@ from ..security import is_memory_write_shell_command
 
 logger = logging.getLogger(__name__)
 _DEFAULT_SHUTDOWN_JOIN_TIMEOUT_SECONDS = 3.0
-
-if TYPE_CHECKING:
-    from ...tui.sink import UiSink
-
 
 class WarningSink(Protocol):
     """Minimal UI sink contract needed by shell_task."""

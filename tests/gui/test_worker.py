@@ -194,7 +194,6 @@ class TestScanLayout:
         )
         worker.scan_layout()
         # The system message should use layout_prompt, not system_prompt
-        call_messages = None
         # FakeWorkerClient asserts messages[0].role == "system"
         # We verify the prompt content by inspecting the client directly
         assert client.call_count == 1

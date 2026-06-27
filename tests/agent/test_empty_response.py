@@ -1,8 +1,8 @@
 """Tests for empty response fallback mechanism."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-from chat_agent.agent.core import _run_empty_response_fallback, _EMPTY_RESPONSE_NUDGE
+from chat_agent.agent.core import _run_empty_response_fallback
 
 
 def _make_deps(chat_response="fallback text"):

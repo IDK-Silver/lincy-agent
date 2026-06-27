@@ -1,6 +1,6 @@
 """Tests for tools/builtin/vision.py: VisionAgent."""
 
-from chat_agent.llm.schema import ContentPart, Message
+from chat_agent.llm.schema import ContentPart
 from chat_agent.tools.builtin.vision import VisionAgent
 
 

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from chat_agent.llm.schema import ContentPart
 from chat_agent.tools.builtin.image import (
     READ_IMAGE_DEFINITION,
     READ_IMAGE_BY_SUBAGENT_DEFINITION,

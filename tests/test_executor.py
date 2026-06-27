@@ -4,7 +4,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
 
 from chat_agent.tools.executor import ShellExecutor
 from chat_agent.tools.builtin.shell import (
@@ -123,7 +122,7 @@ class TestShellExecutor:
     def test_creates_agent_os_dir(self, tmp_path: Path):
         """Working directory is created if it doesn't exist."""
         new_dir = tmp_path / "new" / "nested" / "dir"
-        executor = ShellExecutor(agent_os_dir=new_dir)
+        ShellExecutor(agent_os_dir=new_dir)
         assert new_dir.exists()
 
     def test_multiline_output(self, tmp_path: Path):
@@ -290,7 +289,7 @@ EOF""")
             "echo aaa; echo bbb",
             on_stdout_line=lines.append,
             output_transform=lambda collected: ",".join(
-                l for l in collected if l in ("aaa", "bbb")
+                line for line in collected if line in ("aaa", "bbb")
             ),
         )
         assert result == "aaa,bbb"
@@ -361,7 +360,10 @@ class TestExecuteShellStreamingDetection:
                 return "ok"
 
         dummy = DummyExecutor()
-        callback = lambda _line: None
+
+        def callback(_line):
+            return None
+
         wrapper = create_execute_shell(
             dummy,  # type: ignore[arg-type]
             on_stdout_line=callback,
@@ -389,8 +391,13 @@ class TestExecuteShellStreamingDetection:
                 return "ok"
 
         dummy = DummyExecutor()
-        callback = lambda _line: None
-        transform = lambda lines: ",".join(lines)
+
+        def callback(_line):
+            return None
+
+        def transform(lines):
+            return ",".join(lines)
+
         wrapper = create_execute_shell(
             dummy,  # type: ignore[arg-type]
             on_stdout_line=callback,

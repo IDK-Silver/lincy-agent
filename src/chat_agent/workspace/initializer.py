@@ -9,7 +9,7 @@ import shutil
 from ..skills import PERSONAL_SKILLS_DIR, rebuild_personal_skills_index
 from .backup import WorkspaceBackup
 from .manager import WorkspaceManager
-from .migrator import Migrator
+from .migrator import MigrationResult, Migrator
 
 
 _PROMPT_DUPLICATE_RE = re.compile(r"^(?P<stem>.+) (?P<index>\d+)(?P<suffix>\.[^.]+)$")
@@ -97,7 +97,6 @@ class WorkspaceInitializer:
         Returns:
             MigrationResult with applied versions and summaries.
         """
-        from .migrator import MigrationResult  # noqa: F811
 
         backup = WorkspaceBackup(self.manager.agent_os_dir)
         current_version = self.manager.get_kernel_version()

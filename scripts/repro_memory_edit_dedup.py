@@ -187,7 +187,7 @@ def run_planner(model_path: str, system_prompt: str, *, instruction: str, label:
             all_ok = False
 
     if planner.last_raw_response:
-        print(f"\n  Raw LLM response (first 800 chars):")
+        print("\n  Raw LLM response (first 800 chars):")
         print(f"  {planner.last_raw_response[:800]}")
 
     # Show final file state
@@ -202,7 +202,6 @@ def run_planner(model_path: str, system_prompt: str, *, instruction: str, label:
     print("EVALUATION:")
     print(f"{'─'*40}")
 
-    lines = [l.strip() for l in content.splitlines() if l.strip().startswith("- ")]
     section_items: dict[str, list[str]] = {}
     current = None
     for line in content.splitlines():
@@ -222,7 +221,7 @@ def run_planner(model_path: str, system_prompt: str, *, instruction: str, label:
     tool_items = section_items.get("## 清單", [])
     cat_items = [i for i in section_items.get("## 重要記錄", []) if "貓" in i]
 
-    print(f"\n  Dedup checks:")
+    print("\n  Dedup checks:")
     print(f"    kaomoji/顏文字 rules: {len(kaomoji_items)} (expect 1) {'OK' if len(kaomoji_items) == 1 else 'FAIL'}")
     print(f"    tone/語氣 rules:      {len(tone_items)} (expect 1) {'OK' if len(tone_items) == 1 else 'FAIL'}")
     print(f"    tool list items:      {len(tool_items)} (expect 1) {'OK' if len(tool_items) == 1 else 'FAIL'}")
@@ -269,7 +268,7 @@ def main():
 
     print("Testing memory_editor dedup capability")
     print(f"Variants: {variants}")
-    print(f"\nExpected: merge 4 pairs of similar entries into 4 single entries")
+    print("\nExpected: merge 4 pairs of similar entries into 4 single entries")
 
     summary = []
     for model_path in models:

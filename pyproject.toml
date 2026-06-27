@@ -48,6 +48,9 @@ members = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+
 [dependency-groups]
 dev = [
     "anthropic>=0.84.0",

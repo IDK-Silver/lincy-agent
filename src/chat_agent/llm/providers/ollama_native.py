@@ -17,7 +17,6 @@ from ..schema import (
     LLMResponse,
     MalformedFunctionCallError,
     Message,
-    OllamaNativeFunctionCall,
     OllamaNativeFunctionDef,
     OllamaNativeMessagePayload,
     OllamaNativeRequest,

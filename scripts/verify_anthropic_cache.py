@@ -170,7 +170,7 @@ def test_same_turn_rebuild(tmp_path: Path, client) -> bool:
     messages = _advance_responder_cache_breakpoint(builder.build(conv))
     _describe_bp(messages)
 
-    r1 = _send("call 1 (cold)", client, messages)
+    _send("call 1 (cold)", client, messages)
     _sleep()
     r2 = _send("call 2 (warm)", client, messages)
 
@@ -197,7 +197,7 @@ def test_multi_turn_growth(tmp_path: Path, client) -> bool:
 
     # Turn 1 - cold
     msgs1 = _advance_responder_cache_breakpoint(builder.build(conv))
-    r1 = _send("turn 1 call 1 (cold)", client, msgs1)
+    _send("turn 1 call 1 (cold)", client, msgs1)
     _sleep()
     r1b = _send("turn 1 call 2 (warm)", client, msgs1)
     _sleep()
@@ -213,7 +213,7 @@ def test_multi_turn_growth(tmp_path: Path, client) -> bool:
 
     msgs2 = _advance_responder_cache_breakpoint(builder.build(conv))
     _describe_bp(msgs2)
-    r2 = _send("turn 2 call 1", client, msgs2)
+    _send("turn 2 call 1", client, msgs2)
     _sleep()
     r2b = _send("turn 2 call 2", client, msgs2)
 
@@ -273,9 +273,9 @@ def test_cross_turn_stability(tmp_path: Path, client) -> bool:
 
     # Turn 1: warm the cache
     msgs1 = _advance_responder_cache_breakpoint(builder.build(conv))
-    r1 = _send("turn 1 (cold)", client, msgs1)
+    _send("turn 1 (cold)", client, msgs1)
     _sleep()
-    r1b = _send("turn 1 (warm)", client, msgs1)
+    _send("turn 1 (warm)", client, msgs1)
     _sleep()
 
     # Turn 2
@@ -318,7 +318,7 @@ def test_cross_turn_stability(tmp_path: Path, client) -> bool:
     print(f"  Result: turn2 first-call={rate2:.1f}%, turn3 first-call={rate3:.1f}% "
           f"{'(' + PASS + ')' if ok else '(' + FAIL + ')'}")
     if not ok:
-        print(f"  (Expected >85%. If ~55%, render cache is not preventing prefix divergence)")
+        print("  (Expected >85%. If ~55%, render cache is not preventing prefix divergence)")
     return ok
 
 
@@ -391,7 +391,7 @@ def test_render_cache_persistence(tmp_path: Path, client) -> bool:
         f"{'(' + PASS + ')' if ok else '(' + FAIL + ')'}"
     )
     if not ok:
-        print(f"  (Expected >85%. If ~55%, render cache import is not working)")
+        print("  (Expected >85%. If ~55%, render cache import is not working)")
     return ok
 
 

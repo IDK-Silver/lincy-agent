@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from copilot_proxy.__main__ import run_login
 from copilot_proxy.auth import (

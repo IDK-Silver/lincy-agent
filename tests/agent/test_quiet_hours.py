@@ -1,6 +1,6 @@
 """Tests for heartbeat quiet hours."""
 
-from datetime import datetime, time, timezone, timedelta
+from datetime import datetime, time, timezone
 
 import pytest
 

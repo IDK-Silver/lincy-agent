@@ -1,7 +1,6 @@
 """Tests for ChatConsole channel display methods."""
 
 from io import StringIO
-from unittest.mock import MagicMock
 
 from rich.console import Console
 

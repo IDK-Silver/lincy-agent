@@ -1,0 +1,21 @@
+{
+  "include": [
+    "src",
+    "scripts",
+    "tests"
+  ],
+  "exclude": [
+    ".agent",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".worktrees",
+    "docs",
+    "logs"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "off",
+  "useLibraryCodeForTypes": true
+}

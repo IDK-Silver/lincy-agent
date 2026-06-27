@@ -6,7 +6,6 @@ import os
 import sys
 import time
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from rich.text import Text

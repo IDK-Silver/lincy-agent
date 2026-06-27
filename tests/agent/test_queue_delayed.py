@@ -1,12 +1,10 @@
 """Tests for delayed message (not_before) support in PersistentPriorityQueue."""
 
 import json
-import threading
 from datetime import datetime, timedelta, timezone
 
 from chat_agent.timezone_utils import now as tz_now
 
-import pytest
 
 from chat_agent.agent.queue import (
     PersistentPriorityQueue,

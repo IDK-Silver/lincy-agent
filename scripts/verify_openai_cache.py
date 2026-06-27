@@ -157,7 +157,7 @@ def test_automatic_caching(tmp_path: Path, client) -> bool:
     )
     messages = builder.build(conv)
 
-    r1 = _send("call 1 (cold)", client, messages)
+    _send("call 1 (cold)", client, messages)
     _sleep()
     r2 = _send("call 2 (should cache-hit)", client, messages)
 
@@ -193,7 +193,7 @@ def test_cache_control_tolerance(tmp_path: Path, client) -> bool:
     print(f"  Breakpoints injected: {bp_count}")
 
     try:
-        r1 = _send("call with cache_control", client, messages)
+        _send("call with cache_control", client, messages)
         print(f"  Result: API accepted cache_control without error ({PASS})")
         _sleep()
         r2 = _send("call 2 (cache still works?)", client, messages)
@@ -224,7 +224,7 @@ def test_multi_turn(tmp_path: Path, client) -> bool:
 
     # Turn 1 - warm the cache
     msgs1 = builder.build(conv)
-    r1 = _send("turn 1 call 1 (cold)", client, msgs1)
+    _send("turn 1 call 1 (cold)", client, msgs1)
     _sleep()
     r1b = _send("turn 1 call 2 (warm)", client, msgs1)
     _sleep()
@@ -326,7 +326,7 @@ def test_prompt_cache_retention(config: OpenAIConfig, tmp_path: Path) -> bool:
         if cached2 > 0:
             print(f"  Cache hit confirmed with 24h retention ({PASS})")
         else:
-            print(f"  No cache hit yet (may need longer prefix or retry)")
+            print("  No cache hit yet (may need longer prefix or retry)")
         return True
 
     except httpx.HTTPStatusError as exc:

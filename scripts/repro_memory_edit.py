@@ -18,7 +18,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chat_agent.core.config import resolve_llm_config
 from chat_agent.llm.factory import create_client
-from chat_agent.memory.editor.apply import _replace_block
 from chat_agent.memory.editor.planner import MemoryEditPlanner
 from chat_agent.memory.editor.schema import MemoryEditRequest
 
@@ -131,7 +130,7 @@ def run_planner(model_path: str, system_prompt: str) -> dict:
             elif matches == 1:
                 updated = LONG_TERM_CONTENT.replace(old, new, 1)
                 print("      >>> RESULT: would apply successfully")
-                print(f"      >>> Updated content preview:")
+                print("      >>> Updated content preview:")
                 # Show just the changed area
                 for line in updated.splitlines():
                     if line.strip() and line not in LONG_TERM_CONTENT:
@@ -148,7 +147,7 @@ def run_planner(model_path: str, system_prompt: str) -> dict:
             results.append("ok")
 
     if planner.last_raw_response:
-        print(f"\n  Raw LLM response (first 500 chars):")
+        print("\n  Raw LLM response (first 500 chars):")
         print(f"  {planner.last_raw_response[:500]}")
 
     all_ok = all(r == "ok" for r in results)
@@ -170,7 +169,7 @@ def main():
 
     print("Reproducing memory_editor planner with instruction:")
     print(f"  {INSTRUCTION}")
-    print(f"\nTarget file: memory/agent/long-term.md (empty template)")
+    print("\nTarget file: memory/agent/long-term.md (empty template)")
 
     summary = []
     for model_path in models:

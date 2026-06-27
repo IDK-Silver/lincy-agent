@@ -1,7 +1,6 @@
 """Workspace backup utilities for kernel upgrades."""
 
 import shutil
-from datetime import datetime
 
 from ..timezone_utils import now as tz_now
 from pathlib import Path

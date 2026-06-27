@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from chat_agent.brain_prompt_policy import BrainPromptPolicy
 from chat_agent.context.builder import ContextBuilder
 from chat_agent.context.conversation import Conversation
-from chat_agent.llm.schema import ContentPart
 from chat_agent.send_message_batch_guidance import (
     SYSTEM_PROMPT_FRAGMENT_PATH,
     SYSTEM_PROMPT_PLACEHOLDER,

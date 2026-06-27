@@ -1,6 +1,5 @@
 """Tests for send_message tool."""
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from chat_agent.agent.contact_map import ContactMap
