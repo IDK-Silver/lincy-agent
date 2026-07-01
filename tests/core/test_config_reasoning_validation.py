@@ -455,3 +455,109 @@ def test_openrouter_reasoning_max_tokens_rejects_below_1024(monkeypatch, tmp_pat
 
     with pytest.raises(Exception):
         config_module.resolve_llm_config("llm/x.yaml")
+
+
+# --- use_own_vision_ability vision coverage ---
+
+
+def _write_ollama_profile(path: Path, *, model: str, vision: bool) -> None:
+    _write_yaml(
+        path,
+        {
+            "provider": "ollama",
+            "model": model,
+            "vision": vision,
+            "thinking": {"mode": "toggle", "enabled": False},
+        },
+    )
+
+
+def test_load_config_rejects_vision_gap_in_fallback_when_use_own_vision_ability(
+    monkeypatch, tmp_path: Path
+):
+    _write_ollama_profile(tmp_path / "llm" / "vision-ok.yaml", model="a", vision=True)
+    _write_ollama_profile(tmp_path / "llm" / "no-vision.yaml", model="b", vision=False)
+    _write_yaml(
+        tmp_path / "basic.yaml",
+        {
+            "agents": {
+                "brain": {
+                    "llm": "llm/vision-ok.yaml",
+                    "llm_fallbacks": ["llm/no-vision.yaml"],
+                    "use_own_vision_ability": True,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    with pytest.raises(SystemExit, match="agents.brain.llm_fallbacks\\[0\\].*does not support vision"):
+        config_module.load_config("basic.yaml")
+
+
+def test_load_config_rejects_vision_gap_in_primary_when_use_own_vision_ability(
+    monkeypatch, tmp_path: Path
+):
+    _write_ollama_profile(tmp_path / "llm" / "no-vision.yaml", model="a", vision=False)
+    _write_yaml(
+        tmp_path / "basic.yaml",
+        {
+            "agents": {
+                "brain": {
+                    "llm": "llm/no-vision.yaml",
+                    "use_own_vision_ability": True,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    with pytest.raises(SystemExit, match="agents.brain.llm.*does not support vision"):
+        config_module.load_config("basic.yaml")
+
+
+def test_load_config_allows_vision_gap_when_use_own_vision_ability_false(
+    monkeypatch, tmp_path: Path
+):
+    _write_ollama_profile(tmp_path / "llm" / "vision-ok.yaml", model="a", vision=True)
+    _write_ollama_profile(tmp_path / "llm" / "no-vision.yaml", model="b", vision=False)
+    _write_yaml(
+        tmp_path / "basic.yaml",
+        {
+            "agents": {
+                "brain": {
+                    "llm": "llm/vision-ok.yaml",
+                    "llm_fallbacks": ["llm/no-vision.yaml"],
+                    "use_own_vision_ability": False,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    config = config_module.load_config("basic.yaml")
+    assert config.agents["brain"].use_own_vision_ability is False
+
+
+def test_load_config_accepts_full_vision_coverage_when_use_own_vision_ability(
+    monkeypatch, tmp_path: Path
+):
+    _write_ollama_profile(tmp_path / "llm" / "vision-ok.yaml", model="a", vision=True)
+    _write_ollama_profile(tmp_path / "llm" / "vision-ok-2.yaml", model="b", vision=True)
+    _write_yaml(
+        tmp_path / "basic.yaml",
+        {
+            "agents": {
+                "brain": {
+                    "llm": "llm/vision-ok.yaml",
+                    "llm_fallbacks": ["llm/vision-ok-2.yaml"],
+                    "use_own_vision_ability": True,
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    config = config_module.load_config("basic.yaml")
+    assert config.agents["brain"].use_own_vision_ability is True
+    assert config.agents["brain"].llm_fallbacks[0].get_vision() is True

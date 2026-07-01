@@ -130,37 +130,34 @@ def test_repo_agent_config_brain_uses_claude_code_with_expected_fallbacks():
     assert brain_llm.temperature == 1.0
 
     fallbacks = config.agents["brain"].llm_fallbacks
-    assert [cfg.provider for cfg in fallbacks] == ["codex", "deepseek", "codex", "codex"]
-    assert [cfg.model for cfg in fallbacks] == [
-        "gpt-5.5",
-        "deepseek-v4-pro",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-    ]
+    assert [cfg.provider for cfg in fallbacks] == ["codex"]
+    assert [cfg.model for cfg in fallbacks] == ["gpt-5.5"]
     assert fallbacks[0].reasoning.enabled is True
     assert fallbacks[0].reasoning.effort == "xhigh"
-    assert fallbacks[1].thinking.enabled is True
 
 
-def test_repo_agent_config_memory_editor_uses_codex_no_thinking():
+def test_repo_agent_config_memory_editor_uses_claude_sonnet_5_no_thinking():
     config = config_module.load_config("agent.yaml")
 
     memory_editor_llm = config.agents["memory_editor"].llm
-    assert memory_editor_llm.provider == "codex"
-    assert memory_editor_llm.model == "gpt-5.5"
-    assert memory_editor_llm.reasoning is not None
-    assert memory_editor_llm.reasoning.enabled is False
-    assert memory_editor_llm.reasoning.effort is None
+    assert memory_editor_llm.provider == "claude_code"
+    assert memory_editor_llm.model == "claude-sonnet-5"
+    assert memory_editor_llm.thinking is not None
+    assert memory_editor_llm.thinking.type == "disabled"
+    assert memory_editor_llm.output_config is not None
+    assert memory_editor_llm.output_config.effort == "low"
 
     fallbacks = config.agents["memory_editor"].llm_fallbacks
-    assert [cfg.provider for cfg in fallbacks] == ["deepseek", "codex", "codex"]
+    assert [cfg.provider for cfg in fallbacks] == ["deepseek", "deepseek", "codex"]
     assert [cfg.model for cfg in fallbacks] == [
         "deepseek-v4-flash",
-        "gpt-5.4-mini",
-        "gpt-5.3-codex",
+        "deepseek-v4-pro",
+        "gpt-5.5",
     ]
     assert fallbacks[0].thinking.enabled is False
-    assert all(cfg.reasoning.enabled is False for cfg in fallbacks[1:])
+    assert fallbacks[1].thinking.enabled is False
+    assert fallbacks[2].reasoning.enabled is True
+    assert fallbacks[2].reasoning.effort == "low"
 
 
 def test_repo_kimi_k26_cloud_profile_loads():

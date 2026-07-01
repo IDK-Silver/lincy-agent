@@ -70,6 +70,8 @@
 | Required system prompt | 第一個 system text block 需為 `You are Claude Code, Anthropic's official CLI for Claude.` | 逆向 / 實測 | 中 | 社群 proxy 與實測都依賴此行為 |
 | Beta headers | `claude-code-*`, `oauth-*`, `interleaved-thinking-*`, `fine-grained-tool-streaming-*` 等 beta header | 逆向 / 實測 | 低 | 非穩定契約，可能隨上游變動 |
 | OAuth refresh endpoint | `POST https://console.anthropic.com/v1/oauth/token` | 逆向 / 實測 | 中 | 用 refresh token 換新 access token |
+| Sonnet 5 thinking 預設 | Claude Sonnet 5（`claude-sonnet-5`）adaptive thinking 預設開啟，省略 `thinking` 等同 `{"type": "adaptive"}`；手動 `{"type": "enabled", "budget_tokens": N}` 回 400；需顯式送 `{"type": "disabled"}` 才能關閉。與 Opus 4.7/4.8（預設關閉、需顯式送 `adaptive` 才開啟）相反 | Anthropic 官方文件 | 高 | 2026-07 查證，[Adaptive Thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking) |
+| Sonnet 5 effort 支援值 | 官方支援 `low/medium/high(預設)/xhigh/max` | Anthropic 官方文件 | 高 | [Effort](https://platform.claude.com/docs/en/build-with-claude/effort)；本專案 schema 現況見下方 adapter 規則 |
 
 ### 2. 本專案 adapter 規則
 
@@ -84,6 +86,7 @@
 | Credentials 保護 | proxy **不修改** `~/.claude/.credentials.json`；只匯入 / refresh 後寫自己的 token store | `src/claude_code_proxy/auth.py` |
 | Thinking payload | YAML 直接用 Claude Code `thinking` 物件：`type=adaptive|enabled|disabled`；`enabled` 時可選 `budget_tokens` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
 | Effort payload | YAML 直接用 `output_config.effort`；client passthrough 成 upstream `output_config` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
+| Effort 值集合限制 | `ClaudeCodeOutputConfig.effort` 目前只允許 `low/medium/high/max`；官方已對 Sonnet 5、Opus 4.7、Opus 4.8 開放 `xhigh`，本專案尚未擴充 schema | `src/chat_agent/core/schema.py`（`ClaudeCodeOutputConfig`） |
 | Effort beta header | proxy 依 request model / `output_config.effort` 動態補 `effort-2025-11-24`，不再只靠固定 header 清單 | `src/claude_code_proxy/service.py` |
 | Prompt caching 開關 | app 層將 `claude_code` 列入 cache provider 白名單，讓 `ContextBuilder` 可下 BP1/BP2/BP3 | `src/chat_agent/cli/app.py` + `src/chat_agent/context/builder.py` |
 | Availability 錯誤處理 | `HTTP 429` 與 `HTTP 529 overloaded` 都視為 availability/transient failure，走 retry / failover；不歸類成 request-format | `src/chat_agent/llm/retry.py` + `src/chat_agent/llm/failover.py` + `src/chat_agent/agent/core.py` |

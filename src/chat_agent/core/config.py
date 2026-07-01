@@ -177,7 +177,31 @@ def load_config(config_path: str = "agent.yaml") -> AppConfig:
                     for index, item in enumerate(raw_fallbacks)
                 ]
 
-    return AppConfig.model_validate(raw)
+    config = AppConfig.model_validate(raw)
+    _validate_vision_coverage(config)
+    return config
+
+
+def _validate_vision_coverage(config: AppConfig) -> None:
+    """Fail fast when an agent reads images itself but a model in its main/
+    fallback chain cannot see them (e.g. a mid-turn failover would silently
+    lose vision).
+    """
+    for agent_name, agent_config in config.agents.items():
+        if not agent_config.use_own_vision_ability:
+            continue
+        chain = [("llm", agent_config.llm)] + [
+            (f"llm_fallbacks[{index}]", model)
+            for index, model in enumerate(agent_config.llm_fallbacks)
+        ]
+        for field_path, model in chain:
+            if not model.get_vision():
+                raise SystemExit(
+                    f"Config error: agents.{agent_name}.{field_path} "
+                    f"(provider={model.provider}, model={model.model}) does not "
+                    f"support vision, but agents.{agent_name}.use_own_vision_ability "
+                    "is true"
+                )
 
 
 def load_app_timezone(config_path: str = "agent.yaml") -> str:

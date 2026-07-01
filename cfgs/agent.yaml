@@ -22,7 +22,7 @@ tui:
 
 # Context window management
 context:
-  soft_max_prompt_tokens: 256000
+  soft_max_prompt_tokens: 400000
   preserve_turns: 4
   # Core rules: high attention weight, injected as system message
   boot_files:
@@ -268,14 +268,13 @@ tools:
 # Agents
 agents:
   brain:
-    llm: cfgs/llm/deepseek/deepseek-v4-pro/thinking.yaml
+    llm: cfgs/llm/claude_code/claude-opus-4.8/thinking.yaml
     llm_fallbacks:
-      - cfgs/llm/claude_code/claude-opus-4.8/thinking.yaml
       - cfgs/llm/codex/gpt-5.5/thinking.yaml
     llm_request_timeout: 180
     llm_transient_retries: 3
     warn_on_failure: true
-    use_own_vision_ability: false
+    use_own_vision_ability: true
     cache:
       enabled: true
       ttl: "24h"
@@ -339,8 +338,9 @@ agents:
 
   memory_editor:
     enabled: true
-    llm: cfgs/llm/deepseek/deepseek-v4-flash/no-thinking.yaml
+    llm: cfgs/llm/claude_code/claude-sonnet-5/no-thinking.yaml
     llm_fallbacks:
+      - cfgs/llm/deepseek/deepseek-v4-flash/no-thinking.yaml
       - cfgs/llm/deepseek/deepseek-v4-pro/no-thinking.yaml
       - cfgs/llm/codex/gpt-5.5/low-thinking.yaml
     llm_request_timeout: 120
