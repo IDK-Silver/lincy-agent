@@ -13,6 +13,7 @@ from .service import (
     ClaudeCodeProxyService,
     ClaudeCodeTokenUnavailableError,
     ClaudeCodeUpstreamError,
+    ClaudeCodeUpstreamTimeoutError,
 )
 from .settings import ClaudeCodeProxySettings
 
@@ -57,6 +58,8 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
             )
         except ClaudeCodeTokenUnavailableError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503)
+        except ClaudeCodeUpstreamTimeoutError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=504)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 

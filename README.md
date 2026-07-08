@@ -71,9 +71,9 @@ uv run claude-code-proxy serve
 
 ### 多帳號 failover
 
-登入多顆帳號後，serve 平時**只用優先級最高**（預設為最新登入）的那顆；只有在上游回 **401/403** 時才自動把該顆停用（bench）、切下一顆重試。停用是**帶冷卻時間**（預設 5 分鐘）而非永久，讓因瞬間 401/403 而失敗的 token 冷卻後自動歸隊，一次抖動不會把 token 池縮到重啟才恢復。優先級可用 `tokens promote <id>` 調整。舊版單顆 `token.json` 會在首次讀取時自動併入 `tokens.json`。
+登入多顆帳號後，serve 平時**只用優先級最高**（預設為最新登入）的那顆；上游回 **401/403/429**，或等不到 upstream response headers 而 `ReadTimeout` 時，會自動把該顆停用（bench）、切下一顆重試。停用是**帶冷卻時間**（預設 5 分鐘）而非永久，讓因瞬間錯誤而失敗的 token 冷卻後自動歸隊，一次抖動不會把 token 池縮到重啟才恢復。優先級可用 `tokens promote <id>` 調整。舊版單顆 `token.json` 會在首次讀取時自動併入 `tokens.json`。
 
-錯誤語意：若本輪把所有可用 token 都試過仍是 401/403，client 收到的是**上游的原始錯誤**（例如 401），而非被包裝掉；只有在**完全沒有 token 可試**（store 為空，或所有顆都還在冷卻中）時才回 `503`（JSON `error` 訊息）。
+錯誤語意：若本輪把所有可用 token 都試過仍是 401/403/429，client 收到的是**上游的原始錯誤**（例如 429），而非被包裝掉；若所有可用 token 都 timeout，client 收到 `504`。只有在**完全沒有 token 可試**（store 為空，或所有顆都還在冷卻中）時才回 `503`（JSON `error` 訊息）。
 
 ### serve 設定
 

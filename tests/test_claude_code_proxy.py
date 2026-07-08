@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import json
 
+import httpx
 import pytest
 
 from claude_code_proxy.auth import StoredClaudeCodeToken, StoredClaudeCodeTokenStore
@@ -34,7 +35,7 @@ class _AsyncResponse:
 class _AsyncClient:
     """Mock httpx.AsyncClient. Effects are (status_code, payload) tuples."""
 
-    def __init__(self, effects: list[tuple[int, dict]], calls: list[dict]):
+    def __init__(self, effects: list[tuple[int, dict] | Exception], calls: list[dict]):
         self._effects = effects
         self._calls = calls
 
@@ -46,11 +47,16 @@ class _AsyncClient:
 
     async def post(self, url: str, headers: dict, json: dict):
         self._calls.append({"method": "POST", "url": url, "headers": headers, "json": json})
-        status, payload = self._effects.pop(0)
+        effect = self._effects.pop(0)
+        if isinstance(effect, Exception):
+            raise effect
+        status, payload = effect
         return _AsyncResponse(payload, status_code=status)
 
 
-def _patch_async_httpx(monkeypatch, effects: list[tuple[int, dict]], calls: list[dict]) -> None:
+def _patch_async_httpx(
+    monkeypatch, effects: list[tuple[int, dict] | Exception], calls: list[dict]
+) -> None:
     monkeypatch.setattr(
         "claude_code_proxy.service.httpx.AsyncClient",
         lambda timeout: _AsyncClient(effects, calls),
@@ -154,6 +160,64 @@ async def test_forward_json_fails_over_to_next_token_on_401(monkeypatch, tmp_pat
     ]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
+
+    service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
+    body, _ = await service.forward_json(_request())
+
+    assert json.loads(body)["content"][0]["text"] == "ok"
+    assert calls[0]["headers"]["Authorization"] == "Bearer tok-primary"
+    assert calls[1]["headers"]["Authorization"] == "Bearer tok-backup"
+
+
+@pytest.mark.asyncio
+async def test_forward_json_fails_over_to_next_token_on_429(monkeypatch, tmp_path):
+    store = _point_store_at(monkeypatch, tmp_path)
+    older = datetime(2026, 1, 1, tzinfo=UTC)
+    newer = datetime(2026, 6, 1, tzinfo=UTC)
+    store.replace_all(
+        [
+            _fresh_token(token_id="primary", access_token="tok-primary", created_at=newer),
+            _fresh_token(token_id="backup", access_token="tok-backup", created_at=older),
+        ]
+    )
+    calls: list[dict] = []
+    _patch_async_httpx(
+        monkeypatch,
+        [
+            (429, {"error": {"type": "rate_limit_error", "message": "usage limit"}}),
+            (200, {"content": [{"type": "text", "text": "ok"}]}),
+        ],
+        calls,
+    )
+
+    service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
+    body, _ = await service.forward_json(_request())
+
+    assert json.loads(body)["content"][0]["text"] == "ok"
+    assert calls[0]["headers"]["Authorization"] == "Bearer tok-primary"
+    assert calls[1]["headers"]["Authorization"] == "Bearer tok-backup"
+
+
+@pytest.mark.asyncio
+async def test_forward_json_fails_over_to_next_token_on_read_timeout(monkeypatch, tmp_path):
+    store = _point_store_at(monkeypatch, tmp_path)
+    older = datetime(2026, 1, 1, tzinfo=UTC)
+    newer = datetime(2026, 6, 1, tzinfo=UTC)
+    store.replace_all(
+        [
+            _fresh_token(token_id="primary", access_token="tok-primary", created_at=newer),
+            _fresh_token(token_id="backup", access_token="tok-backup", created_at=older),
+        ]
+    )
+    calls: list[dict] = []
+    _patch_async_httpx(
+        monkeypatch,
+        [
+            httpx.ReadTimeout("timed out while waiting for response headers"),
+            (200, {"content": [{"type": "text", "text": "ok"}]}),
+        ],
+        calls,
+    )
 
     service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
     body, _ = await service.forward_json(_request())

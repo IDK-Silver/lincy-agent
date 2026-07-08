@@ -22,8 +22,9 @@ from .settings import ClaudeCodeProxySettings
 EFFORT_BETA_HEADER = "effort-2025-11-24"
 
 # Upstream status codes that should trigger failover to the next token rather than
-# surfacing the error to the client.
-FAILOVER_STATUS_CODES = frozenset({401, 403})
+# surfacing the error to the client. Claude Code quota exhaustion may surface as
+# 429, while hard auth / entitlement failures commonly surface as 401/403.
+FAILOVER_STATUS_CODES = frozenset({401, 403, 429})
 
 # How long a token stays benched after an upstream auth failure. A cooldown (rather
 # than a permanent bench) lets a token that failed on a transient 401/403 rejoin the
@@ -42,6 +43,10 @@ class ClaudeCodeUpstreamError(RuntimeError):
         self.status_code = status_code
         self.body = body
         self.media_type = media_type
+
+
+class ClaudeCodeUpstreamTimeoutError(RuntimeError):
+    """All usable tokens timed out while waiting for upstream response headers."""
 
 
 class ClaudeCodeTokenUnavailableError(RuntimeError):
@@ -164,6 +169,7 @@ class ClaudeCodeProxyService:
     async def forward_json(self, request: ClaudeCodeRequest) -> tuple[bytes, str]:
         payload = self._build_upstream_request(request)
         last_upstream: ClaudeCodeUpstreamError | None = None
+        last_timeout: ClaudeCodeUpstreamTimeoutError | None = None
         while True:
             try:
                 token, token_id = await self._tokens.acquire()
@@ -172,13 +178,24 @@ class ClaudeCodeProxyService:
                 # upstream error rather than an opaque "no token available" 503.
                 if last_upstream is not None:
                     raise last_upstream from None
+                if last_timeout is not None:
+                    raise last_timeout from None
                 raise
-            async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
-                response = await client.post(
-                    f"{self._settings.anthropic_base_url}/v1/messages",
-                    headers=self._headers(token, request),
-                    json=payload,
-                )
+            try:
+                async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
+                    response = await client.post(
+                        f"{self._settings.anthropic_base_url}/v1/messages",
+                        headers=self._headers(token, request),
+                        json=payload,
+                    )
+            except httpx.ReadTimeout as exc:
+                if self._should_failover_timeout(token_id):
+                    self._tokens.mark_failed(token_id)
+                    last_timeout = ClaudeCodeUpstreamTimeoutError(
+                        f"Claude Code upstream timed out for token {token_id}"
+                    )
+                    continue
+                raise exc
             if response.status_code < 400:
                 return response.content, response.headers.get("content-type", "application/json")
             error = ClaudeCodeUpstreamError(
@@ -198,12 +215,15 @@ class ClaudeCodeProxyService:
     ) -> tuple[httpx.AsyncClient, httpx.Response]:
         payload = self._build_upstream_request(request)
         last_upstream: ClaudeCodeUpstreamError | None = None
+        last_timeout: ClaudeCodeUpstreamTimeoutError | None = None
         while True:
             try:
                 token, token_id = await self._tokens.acquire()
             except ClaudeCodeTokenUnavailableError:
                 if last_upstream is not None:
                     raise last_upstream from None
+                if last_timeout is not None:
+                    raise last_timeout from None
                 raise
             client = httpx.AsyncClient(timeout=self._settings.request_timeout)
             try:
@@ -214,6 +234,15 @@ class ClaudeCodeProxyService:
                     json=payload,
                 )
                 response = await client.send(upstream_request, stream=True)
+            except httpx.ReadTimeout as exc:
+                await client.aclose()
+                if self._should_failover_timeout(token_id):
+                    self._tokens.mark_failed(token_id)
+                    last_timeout = ClaudeCodeUpstreamTimeoutError(
+                        f"Claude Code upstream timed out for token {token_id}"
+                    )
+                    continue
+                raise exc
             except Exception:
                 await client.aclose()
                 raise
@@ -244,6 +273,10 @@ class ClaudeCodeProxyService:
         """
 
         return token_id != ENV_ACCESS_TOKEN_ID and status_code in FAILOVER_STATUS_CODES
+
+    @staticmethod
+    def _should_failover_timeout(token_id: str) -> bool:
+        return token_id != ENV_ACCESS_TOKEN_ID
 
     def _headers(self, token: str, request: ClaudeCodeRequest) -> dict[str, str]:
         headers = {

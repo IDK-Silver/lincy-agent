@@ -34,8 +34,9 @@ examples:
   claude-code-proxy serve --port 4200      Serve on a custom port
 
 Multiple logins provide failover: serve normally uses the highest-priority token
-and only switches to the next one when the upstream returns 401/403. Priority
-defaults to the newest login and can be changed with `tokens promote`.
+and switches to the next one when upstream returns 401/403/429 or times out while
+waiting for response headers. Priority defaults to the newest login and can be
+changed with `tokens promote`.
 Run `claude-code-proxy <command> --help` for command-specific flags.
 """
 
@@ -88,7 +89,10 @@ def _build_oauth_client(settings: ClaudeCodeProxySettings) -> ClaudeCodeOAuthCli
 def build_serve_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="claude-code-proxy serve",
-        description="Start the proxy server. Uses stored OAuth tokens with 401/403 failover.",
+        description=(
+            "Start the proxy server. Uses stored OAuth tokens with 401/403/429 "
+            "and upstream read-timeout failover."
+        ),
         epilog=SERVE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -134,7 +138,7 @@ def build_tokens_parser() -> argparse.ArgumentParser:
         prog="claude-code-proxy tokens",
         description=(
             "Manage stored OAuth tokens. Priority is newest-first; serve uses the top "
-            "one and fails over on 401/403."
+            "one and fails over on 401/403/429 or upstream read timeout."
         ),
     )
     sub = parser.add_subparsers(dest="tokens_action", required=True)
