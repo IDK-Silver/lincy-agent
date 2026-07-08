@@ -45,20 +45,39 @@ uv run permissions-warmup --list
 uv run chat-cli
 ```
 
-如果要使用 Claude Code provider，另外走獨立 proxy：
+如果要使用 Claude Code provider，另外走獨立 proxy。典型流程是「登入 → 啟動」：
 
 ```bash
-# Browser OAuth login (preferred)
+# 1. Browser OAuth login，可重複執行以登入多顆帳號（做 failover）
 uv run claude-code-proxy login
 
-# Or import an existing Claude Code login state
-uv run claude-code-proxy login --from-claude-code
-
-# Start the Claude Code proxy on http://127.0.0.1:4142
-uv run claude-code-proxy
+# 2. 啟動 proxy on http://127.0.0.1:4142
+uv run claude-code-proxy serve
 ```
 
-`claude-code-proxy login` 預設走 browser OAuth，瀏覽器授權後把 Anthropic 顯示的 `code#state` 貼回 terminal。只有在你明確使用 `--from-claude-code`，或額外啟用 fallback 時，proxy 才會去讀 Claude Code credentials / macOS Keychain。
+`login` 走 browser OAuth：瀏覽器授權後把 Anthropic 顯示的 `code#state` 貼回 terminal。token 存在單一 `tokens.json`，每顆自動配一個 id。
+
+### 子命令一覽
+
+| 命令 | 說明 |
+|------|------|
+| `claude-code-proxy login` | Browser OAuth 登入一顆帳號；重複執行可累積多顆做 failover |
+| `claude-code-proxy serve` | 啟動 proxy（不帶命令時的預設行為） |
+| `claude-code-proxy tokens list` | 列出已登入 token（優先級高者在前） |
+| `claude-code-proxy tokens promote <id>` | 把指定 token 提到最前（設為最高優先） |
+| `claude-code-proxy tokens remove <id>` | 移除某顆 token |
+
+所有命令都可加 `--help` 看用法與 flag，例如 `claude-code-proxy serve --help`、`claude-code-proxy tokens --help`。
+
+### 多帳號 failover
+
+登入多顆帳號後，serve 平時**只用優先級最高**（預設為最新登入）的那顆；只有在上游回 **401/403** 時才自動把該顆停用（bench）、切下一顆重試。停用是**帶冷卻時間**（預設 5 分鐘）而非永久，讓因瞬間 401/403 而失敗的 token 冷卻後自動歸隊，一次抖動不會把 token 池縮到重啟才恢復。優先級可用 `tokens promote <id>` 調整。舊版單顆 `token.json` 會在首次讀取時自動併入 `tokens.json`。
+
+錯誤語意：若本輪把所有可用 token 都試過仍是 401/403，client 收到的是**上游的原始錯誤**（例如 401），而非被包裝掉；只有在**完全沒有 token 可試**（store 為空，或所有顆都還在冷卻中）時才回 `503`（JSON `error` 訊息）。
+
+### serve 設定
+
+serve 端所有設定都有對應 CLI flag（`--host` / `--port` / `--anthropic-base-url` / `--anthropic-version` / `--beta-headers` / `--required-system-prompt` / `--user-agent` / `--request-timeout` / `--access-token`，見 `claude-code-proxy serve --help`）。未給的 flag 會沿用同名 `CLAUDE_CODE_PROXY_*` 環境變數，再退回內建預設。`--access-token`（或 `CLAUDE_CODE_PROXY_ACCESS_TOKEN`）會**略過 token store 直接使用該 token**，不 failover、不 refresh。
 
 如果要使用 Codex provider，先用官方 Codex CLI 登入，讓 `~/.codex/auth.json` 存在。`codex-proxy` 只讀這個預設 auth 檔，不維護自己的 token store：
 

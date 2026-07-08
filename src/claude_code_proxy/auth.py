@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import secrets
-import subprocess
 import sys
-from typing import Any, Literal
+from typing import Iterator, Literal
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFAULT_CLAUDE_CODE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 DEFAULT_CLAUDE_CODE_OAUTH_SCOPE = "org:create_api_key user:profile user:inference"
@@ -31,6 +33,7 @@ class StoredClaudeCodeToken(_StrictModel):
     """Persisted Claude Code OAuth token used by the local proxy."""
 
     version: int = 1
+    id: str = Field(min_length=1)
     access_token: str = Field(min_length=1)
     refresh_token: str | None = None
     expires_at: datetime
@@ -43,23 +46,14 @@ class StoredClaudeCodeToken(_StrictModel):
     client_id: str = Field(min_length=1)
     created_at: datetime
 
-
-class ClaudeCodeCredentialTokens(_StrictModel):
-    # Claude Code may add metadata fields that are irrelevant for token refresh.
-    model_config = ConfigDict(extra="ignore")
-
-    access_token: str = Field(
-        min_length=1,
-        validation_alias=AliasChoices("access_token", "accessToken"),
-    )
-    refresh_token: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("refresh_token", "refreshToken"),
-    )
-    expires_at_ms: int | float | None = Field(
-        default=None,
-        validation_alias=AliasChoices("expires_at", "expiresAt"),
-    )
+    @field_validator("expires_at", "created_at")
+    @classmethod
+    def _ensure_utc(cls, value: datetime) -> datetime:
+        # Externally-produced or hand-edited records may store naive datetimes; assume
+        # UTC so sorting by created_at and expires_at.timestamp() never mix naive/aware.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class ClaudeCodeOAuthTokens(_StrictModel):
@@ -82,7 +76,7 @@ def default_token_path() -> Path:
     if os.name == "nt":
         base = os.environ.get("APPDATA")
         root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-        return root / "chat-agent" / "claude-code-proxy" / "token.json"
+        return root / "chat-agent" / "claude-code-proxy" / "tokens.json"
     if sys.platform == "darwin":
         return (
             Path.home()
@@ -90,30 +84,11 @@ def default_token_path() -> Path:
             / "Application Support"
             / "chat-agent"
             / "claude-code-proxy"
-            / "token.json"
+            / "tokens.json"
         )
     base = os.environ.get("XDG_CONFIG_HOME")
     root = Path(base) if base else Path.home() / ".config"
-    return root / "chat-agent" / "claude-code-proxy" / "token.json"
-
-
-def default_credentials_paths() -> list[Path]:
-    """Return likely Claude Code credential file locations."""
-
-    home = Path.home()
-    return [
-        home / ".claude" / ".credentials.json",
-        home / ".claude" / "credentials.json",
-    ]
-
-
-def default_keychain_service_names() -> list[str]:
-    """Return likely macOS keychain item names used by Claude Code."""
-
-    return [
-        "Claude Code-credentials",
-        "Claude-credentials",
-    ]
+    return root / "chat-agent" / "claude-code-proxy" / "tokens.json"
 
 
 def build_pkce_pair() -> tuple[str, str]:
@@ -131,6 +106,12 @@ def build_state_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def new_token_id() -> str:
+    """Return a short opaque id for a stored token."""
+
+    return secrets.token_urlsafe(8)
+
+
 def parse_manual_authorization_code(value: str) -> tuple[str, str]:
     """Parse Anthropic's manual callback format: `code#state`."""
 
@@ -143,156 +124,159 @@ def parse_manual_authorization_code(value: str) -> tuple[str, str]:
     return code.strip(), state.strip()
 
 
-def resolve_token_path(path: str | os.PathLike[str] | None = None) -> Path:
-    if path is None:
-        return default_token_path()
-    return Path(path).expanduser()
+class StoredClaudeCodeTokenStore:
+    """Load and save proxy-managed Claude Code tokens (multi-token store)."""
 
+    def __init__(self, path: Path | None = None):
+        self.path = path or default_token_path()
 
-def resolve_credentials_path(path: str | os.PathLike[str] | None = None) -> Path | None:
-    if path is None:
-        return None
-    return Path(path).expanduser()
+    def load_all(self) -> list[StoredClaudeCodeToken]:
+        """Return all stored tokens ordered by priority (newest created_at first)."""
 
+        tokens = self._read_records()
+        if tokens is None:
+            return []
+        return sorted(tokens, key=lambda t: t.created_at, reverse=True)
 
-class ClaudeCodeTokenStore:
-    """Load and save proxy-managed Claude Code tokens."""
+    def save(self, token: StoredClaudeCodeToken) -> None:
+        """Append a token to the store, keeping existing entries."""
 
-    def __init__(self, path: Path):
-        self.path = path
+        with self._exclusive_lock():
+            tokens = [t for t in self._read_records() or [] if t.id != token.id]
+            tokens.append(token)
+            self._write_records(tokens)
 
-    def load(self) -> StoredClaudeCodeToken | None:
+    def replace_all(self, tokens: list[StoredClaudeCodeToken]) -> None:
+        with self._exclusive_lock():
+            self._write_records(tokens)
+
+    def remove(self, token_id: str) -> bool:
+        """Drop the token with the given id. Return True if a token was removed."""
+
+        with self._exclusive_lock():
+            tokens = self._read_records() or []
+            remaining = [t for t in tokens if t.id != token_id]
+            if len(remaining) == len(tokens):
+                return False
+            self._write_records(remaining)
+            return True
+
+    def promote(self, token_id: str) -> bool:
+        """Move the token with the given id to the front of the priority order.
+
+        Priority is by ``created_at`` (newest first). Promoting means bumping its
+        ``created_at`` to just above the current maximum so it sorts first.
+        Return True if the token existed.
+        """
+
+        with self._exclusive_lock():
+            tokens = self._read_records() or []
+            target = next((t for t in tokens if t.id == token_id), None)
+            if target is None:
+                return False
+            max_created = max((t.created_at for t in tokens), default=datetime.now(tz=UTC))
+            bumped = target.model_copy(
+                update={"created_at": max_created.replace(microsecond=0) + _seconds(1)}
+            )
+            new_tokens = [bumped if t.id == token_id else t for t in tokens]
+            self._write_records(new_tokens)
+            return True
+
+    @contextmanager
+    def _exclusive_lock(self) -> Iterator[None]:
+        """Serialize read-modify-write across processes via an advisory file lock.
+
+        Guards against a lost update when serve's in-process token refresh and a
+        separate `login` / `tokens` CLI invocation write the store concurrently.
+        """
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with open(lock_path, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _read_records(self) -> list[StoredClaudeCodeToken] | None:
+        """Return raw records (no sort). Migrate legacy single-token file on first read."""
+
+        self._migrate_legacy_if_present()
         if not self.path.is_file():
             return None
         try:
-            return StoredClaudeCodeToken.model_validate_json(self.path.read_text())
-        except (OSError, ValidationError) as exc:
-            raise ValueError(
-                f"Invalid Claude Code token store at {self.path}: {exc}"
-            ) from exc
+            payload = json.loads(self.path.read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Invalid Claude Code token store at {self.path}: {exc}") from exc
+        if not isinstance(payload, (list, dict)):
+            raise ValueError(f"Invalid Claude Code token store at {self.path}: unexpected payload")
+        return self._parse_records(payload)
 
-    def save(self, token: StoredClaudeCodeToken) -> None:
+    @staticmethod
+    def _parse_records(payload: object) -> list[StoredClaudeCodeToken]:
+        """Validate records, skipping any malformed one so it can't poison the store.
+
+        A single bad record (hand-edited, truncated, or written by a build with an
+        extra field) must not disable every other stored token and defeat failover.
+        """
+
+        items = payload if isinstance(payload, list) else [payload]
+        records: list[StoredClaudeCodeToken] = []
+        for item in items:
+            try:
+                records.append(StoredClaudeCodeToken.model_validate(item))
+            except ValidationError:
+                continue
+        return records
+
+    def _migrate_legacy_if_present(self) -> bool:
+        """If the pre-multi-token ``token.json`` exists, fold it into ``tokens.json``.
+
+        One-shot: read the legacy single-token file (which sits beside this store's own
+        path, never the global default), append it with a fresh id, then remove it.
+        """
+
+        legacy = self.path.with_name("token.json")
+        if legacy == self.path or not legacy.is_file():
+            return False
+        try:
+            raw = json.loads(legacy.read_text())
+        except (OSError, ValueError):
+            return False
+        if not isinstance(raw, dict):
+            return False
+        try:
+            token = StoredClaudeCodeToken.model_validate({**raw, "id": new_token_id()})
+        except ValidationError:
+            return False
+        existing: list[StoredClaudeCodeToken] = []
+        if self.path.is_file():
+            try:
+                existing = self._parse_records(json.loads(self.path.read_text()))
+            except (OSError, ValueError):
+                # Existing store is unreadable/corrupt; don't clobber it while migrating.
+                return False
+        # Dedupe by access_token so a failed unlink() below cannot duplicate the
+        # legacy token on a later re-read (migration would otherwise run again).
+        if not any(t.access_token == token.access_token for t in existing):
+            existing.append(token)
+            self._write_records(existing)
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+        return True
+
+    def _write_records(self, tokens: list[StoredClaudeCodeToken]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(token.model_dump_json(indent=2))
+        temp_path.write_text(json.dumps([t.model_dump(mode="json") for t in tokens], indent=2))
         if os.name != "nt":
             os.chmod(temp_path, 0o600)
         temp_path.replace(self.path)
         if os.name != "nt":
             os.chmod(self.path, 0o600)
-
-
-class ClaudeCodeCredentialLoader:
-    """Read Claude Code-installed OAuth credentials without modifying them."""
-
-    def __init__(self, *, path: Path | None = None):
-        self._path = path
-
-    def load(self) -> StoredClaudeCodeToken | None:
-        candidates = [self._path] if self._path is not None else default_credentials_paths()
-        for path in candidates:
-            if path is None or not path.is_file():
-                continue
-            raw = self._read_json(path)
-            return self._parse_credentials_payload(
-                raw,
-                source_name=f"Claude Code credentials at {path}",
-            )
-        if self._path is None:
-            keychain_token = self._load_from_keychain()
-            if keychain_token is not None:
-                return keychain_token
-        return None
-
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, Any]:
-        try:
-            import json
-
-            return json.loads(path.read_text())
-        except OSError as exc:
-            raise ValueError(f"Failed to read Claude Code credentials at {path}: {exc}") from exc
-        except ValueError as exc:
-            raise ValueError(
-                f"Failed to parse Claude Code credentials at {path}: {exc}"
-            ) from exc
-
-    @staticmethod
-    def _read_keychain_secret(service_name: str) -> dict[str, Any] | None:
-        try:
-            completed = subprocess.run(
-                ["security", "find-generic-password", "-w", "-s", service_name],
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-        except OSError:
-            return None
-        if completed.returncode != 0:
-            return None
-        secret = completed.stdout.strip()
-        if not secret:
-            raise ValueError(
-                f"Claude Code keychain item {service_name!r} does not contain JSON credentials"
-            )
-        try:
-            import json
-
-            return json.loads(secret)
-        except ValueError as exc:
-            raise ValueError(
-                f"Failed to parse Claude Code keychain item {service_name!r}: {exc}"
-            ) from exc
-
-    @staticmethod
-    def _extract_oauth_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
-        candidate = payload.get("claudeAiOauth")
-        if isinstance(candidate, dict):
-            return candidate
-        candidate = payload.get("claude_ai_oauth")
-        if isinstance(candidate, dict):
-            return candidate
-        if "accessToken" in payload or "access_token" in payload:
-            return payload
-        return None
-
-    def _load_from_keychain(self) -> StoredClaudeCodeToken | None:
-        if sys.platform != "darwin":
-            return None
-        for service_name in default_keychain_service_names():
-            raw = self._read_keychain_secret(service_name)
-            if raw is None:
-                continue
-            return self._parse_credentials_payload(
-                raw,
-                source_name=f"Claude Code keychain item {service_name!r}",
-            )
-        return None
-
-    @staticmethod
-    def _parse_credentials_payload(
-        raw: dict[str, Any],
-        *,
-        source_name: str,
-    ) -> StoredClaudeCodeToken:
-        oauth_raw = ClaudeCodeCredentialLoader._extract_oauth_payload(raw)
-        if oauth_raw is None:
-            raise ValueError(f"{source_name} does not contain claudeAiOauth")
-        try:
-            tokens = ClaudeCodeCredentialTokens.model_validate(oauth_raw)
-        except ValidationError as exc:
-            raise ValueError(f"Invalid {source_name}: {exc}") from exc
-        expires_at = _coerce_expiry(tokens.expires_at_ms)
-        if expires_at is None:
-            raise ValueError(f"{source_name} does not contain expiresAt")
-        return StoredClaudeCodeToken(
-            access_token=tokens.access_token,
-            refresh_token=tokens.refresh_token,
-            expires_at=expires_at,
-            source="imported_claude_code_credentials",
-            client_id=DEFAULT_CLAUDE_CODE_OAUTH_CLIENT_ID,
-            created_at=datetime.now(tz=UTC),
-        )
 
 
 class ClaudeCodeOAuthClient:
@@ -371,26 +355,21 @@ class ClaudeCodeOAuthClient:
         return self.build_stored_token(payload)
 
     def build_stored_token(self, payload: ClaudeCodeOAuthTokens) -> StoredClaudeCodeToken:
+        # Keep sub-second precision so two logins in the same wall-clock second still
+        # order newest-first (load_all sorts by created_at).
+        now = datetime.now(tz=UTC)
         return StoredClaudeCodeToken(
+            id=new_token_id(),
             access_token=payload.access_token,
             refresh_token=payload.refresh_token,
-            expires_at=datetime.now(tz=UTC).replace(microsecond=0)
-            + _seconds_to_delta(payload.expires_in),
+            expires_at=now + _seconds(payload.expires_in),
             source="oauth_browser",
             client_id=self._client_id,
-            created_at=datetime.now(tz=UTC).replace(microsecond=0),
+            created_at=now,
         )
 
 
-def _coerce_expiry(value: int | float | None) -> datetime | None:
-    if value is None:
-        return None
-    return datetime.fromtimestamp(float(value) / 1000.0, tz=UTC)
-
-
-def _seconds_to_delta(value: int | float):
-    from datetime import timedelta
-
+def _seconds(value: int | float) -> timedelta:
     return timedelta(seconds=float(value))
 
 

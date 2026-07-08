@@ -80,10 +80,11 @@
 | 對內 API | `ClaudeCodeClient` 只打本專案 native proxy `POST /v1/messages` | `src/chat_agent/llm/providers/claude_code.py` |
 | Payload 保真 | client 保留 `system` block array、message block array、`cache_control`；**不壓平成單一 system string** | `src/chat_agent/llm/providers/claude_code.py` |
 | Required prompt 注入 | proxy 在 upstream request 的第一個 system block 固定注入 Claude Code 必要 prompt；若已存在同內容首 block，則不重複注入 | `src/claude_code_proxy/service.py` |
-| Browser OAuth login | `uv run claude-code-proxy login` 預設走 browser OAuth + 手動貼 `code#state`；成功後 token 存到本專案 token store | `src/claude_code_proxy/__main__.py` + `src/claude_code_proxy/auth.py` |
-| Claude Code import login | `uv run claude-code-proxy login --from-claude-code` 明確匯入官方 Claude Code 現有登入狀態 | `src/claude_code_proxy/__main__.py` + `src/claude_code_proxy/auth.py` |
-| Token 來源 | 先讀 env access token，再讀本專案 token store；只有明確啟用 fallback 時才讀 Claude Code credentials / Keychain；refresh 後只寫回本專案 token store | `src/claude_code_proxy/service.py` + `src/claude_code_proxy/auth.py` |
-| Credentials 保護 | proxy **不修改** `~/.claude/.credentials.json`；只匯入 / refresh 後寫自己的 token store | `src/claude_code_proxy/auth.py` |
+| Browser OAuth login | `uv run claude-code-proxy login` 走 browser OAuth + 手動貼 `code#state`；成功後 append 到本專案多顆 token store（`tokens.json`），每顆自動配 id。可重複登入多顆帳號 | `src/claude_code_proxy/__main__.py` + `src/claude_code_proxy/auth.py` |
+| Multi-token failover | serve 平時只用優先級最高（預設最新登入）的一顆；upstream 回 401/403 時把該顆 bench、由下一次 `acquire()` 決定是否有下一顆可切（避免 lock-free 全域計數 race）。bench 帶冷卻（`FAILURE_COOLDOWN_SECONDS`，預設 300s）而非永久，冷卻後自動歸隊。本輪所有顆都失敗時回傳**上游原始錯誤**；完全沒有可試的 token 才回 `503`（`ClaudeCodeTokenUnavailableError`） | `src/claude_code_proxy/service.py` + `src/claude_code_proxy/app.py` |
+| Token 優先級管理 | `tokens list` 列出（新者在前）、`tokens promote <id>` 把某顆提到最前、`tokens remove <id>` 刪除 | `src/claude_code_proxy/__main__.py` + `src/claude_code_proxy/auth.py` |
+| Token 來源 | 先讀 env / `--access-token`（bypass store、不 failover），否則讀多顆 token store 依優先級選一顆，過期則用 refresh token 換新並寫回 store。已移除 Claude Code credentials / Keychain 匯入 | `src/claude_code_proxy/service.py` + `src/claude_code_proxy/auth.py` |
+| 舊檔遷移 | 首次讀取時若偵測到舊版單顆 `token.json`，自動併入 `tokens.json` 並刪舊檔 | `src/claude_code_proxy/auth.py` |
 | Thinking payload | YAML 直接用 Claude Code `thinking` 物件：`type=adaptive|enabled|disabled`；`enabled` 時可選 `budget_tokens` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
 | Effort payload | YAML 直接用 `output_config.effort`；client passthrough 成 upstream `output_config` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
 | Effort 值集合限制 | `ClaudeCodeOutputConfig.effort` 目前只允許 `low/medium/high/max`；官方已對 Sonnet 5、Opus 4.7、Opus 4.8 開放 `xhigh`，本專案尚未擴充 schema | `src/chat_agent/core/schema.py`（`ClaudeCodeOutputConfig`） |

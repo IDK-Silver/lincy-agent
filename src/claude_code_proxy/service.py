@@ -11,16 +11,27 @@ import httpx
 from chat_agent.llm.schema import ClaudeCodeRequest
 
 from .auth import (
-    ClaudeCodeCredentialLoader,
-    ClaudeCodeTokenStore,
     DEFAULT_CLAUDE_CODE_OAUTH_TOKEN_URL,
     StoredClaudeCodeToken,
+    StoredClaudeCodeTokenStore,
     is_token_fresh,
     normalize_bearer_token,
 )
 from .settings import ClaudeCodeProxySettings
 
 EFFORT_BETA_HEADER = "effort-2025-11-24"
+
+# Upstream status codes that should trigger failover to the next token rather than
+# surfacing the error to the client.
+FAILOVER_STATUS_CODES = frozenset({401, 403})
+
+# How long a token stays benched after an upstream auth failure. A cooldown (rather
+# than a permanent bench) lets a token that failed on a transient 401/403 rejoin the
+# failover pool automatically, so a single blip cannot shrink the pool until restart.
+FAILURE_COOLDOWN_SECONDS = 300.0
+
+# Sentinel token id used when --access-token / env bypasses the OAuth token store.
+ENV_ACCESS_TOKEN_ID = "__env_access_token__"
 
 
 class ClaudeCodeUpstreamError(RuntimeError):
@@ -33,88 +44,82 @@ class ClaudeCodeUpstreamError(RuntimeError):
         self.media_type = media_type
 
 
+class ClaudeCodeTokenUnavailableError(RuntimeError):
+    """No usable OAuth token is available to serve the request."""
+
+
+def _now() -> float:
+    return datetime.now(tz=UTC).timestamp()
+
+
 class ClaudeCodeTokenManager:
-    """Load, cache, and refresh Claude Code OAuth tokens."""
+    """Load, cache, and refresh Claude Code OAuth tokens (multi-token failover)."""
 
     def __init__(self, settings: ClaudeCodeProxySettings):
         self._settings = settings
-        self._token_store = ClaudeCodeTokenStore(settings.token_path)
-        self._credentials = ClaudeCodeCredentialLoader(path=settings.credentials_path)
-        self._access_token: str | None = None
-        self._expires_at: datetime | None = None
+        self._store = StoredClaudeCodeTokenStore()
         self._lock = anyio.Lock()
+        # token id -> epoch seconds until which the token stays benched.
+        self._failed_until: dict[str, float] = {}
 
-    async def get_token(self) -> str:
+    async def acquire(self) -> tuple[str, str]:
+        """Return (access_token, token_id) for the highest-priority usable token.
+
+        Raises RuntimeError if no token is usable (credentials import is removed, so
+        the only sources are --access-token / env and the OAuth token store).
+        """
+
         if self._settings.access_token:
-            return normalize_bearer_token(self._settings.access_token)
+            return normalize_bearer_token(self._settings.access_token), ENV_ACCESS_TOKEN_ID
 
         async with self._lock:
-            if (
-                self._access_token is not None
-                and self._expires_at is not None
-                and self._expires_at.timestamp() - 60 > datetime.now(tz=UTC).timestamp()
-            ):
-                return self._access_token
+            return await self._select_usable_token()
 
-            errors: list[str] = []
-            stored = self._load_store(errors)
-            if stored is not None and is_token_fresh(stored):
-                return self._cache_and_return(stored)
+    def mark_failed(self, token_id: str) -> None:
+        """Bench a token for FAILURE_COOLDOWN_SECONDS so acquire() skips it meanwhile."""
 
-            if stored is not None and stored.refresh_token:
+        if token_id == ENV_ACCESS_TOKEN_ID:
+            return
+        self._failed_until[token_id] = _now() + FAILURE_COOLDOWN_SECONDS
+
+    def _is_benched(self, token_id: str) -> bool:
+        return self._failed_until.get(token_id, 0.0) > _now()
+
+    async def _select_usable_token(self) -> tuple[str, str]:
+        errors: list[str] = []
+        tokens = self._store.load_all() or []
+
+        for token in tokens:
+            if self._is_benched(token.id):
+                continue
+            if is_token_fresh(token):
+                return token.access_token, token.id
+            if token.refresh_token:
                 try:
-                    refreshed = await self._refresh(stored.refresh_token)
-                    self._token_store.save(refreshed)
-                    return self._cache_and_return(refreshed)
+                    refreshed = await self._refresh(token)
+                    self._store.save(refreshed)
+                    return refreshed.access_token, refreshed.id
                 except Exception as exc:
-                    errors.append(f"stored refresh failed: {exc}")
+                    errors.append(f"refresh failed for {token.id}: {exc}")
+                    # Skip this token and try the next rather than aborting.
+                    continue
+            # Stale and no refresh token: bench it so we don't keep re-selecting it.
+            self.mark_failed(token.id)
 
-            imported = self._load_credentials(errors)
-            if imported is not None and is_token_fresh(imported):
-                self._token_store.save(imported)
-                return self._cache_and_return(imported)
-
-            if imported is not None and imported.refresh_token:
-                try:
-                    refreshed = await self._refresh(imported.refresh_token)
-                    self._token_store.save(refreshed)
-                    return self._cache_and_return(refreshed)
-                except Exception as exc:
-                    errors.append(f"credential refresh failed: {exc}")
-
-            detail = "; ".join(errors) if errors else "no token source available"
-            raise RuntimeError(
-                "Claude Code token is required. Set CLAUDE_CODE_PROXY_ACCESS_TOKEN, "
-                "run `uv run claude-code-proxy login`, run "
-                "`uv run claude-code-proxy login --from-claude-code`, "
-                f"or enable Claude Code fallback. ({detail})"
+        if not tokens:
+            raise ClaudeCodeTokenUnavailableError(
+                "No Claude Code OAuth tokens stored. Run `uv run claude-code-proxy login`."
             )
+        detail = "; ".join(errors) if errors else "all stored tokens are expired/failed"
+        raise ClaudeCodeTokenUnavailableError(
+            "Claude Code token is required. Set --access-token / "
+            f"CLAUDE_CODE_PROXY_ACCESS_TOKEN, or run `uv run claude-code-proxy login`. ({detail})"
+        )
 
-    def _cache_and_return(self, token: StoredClaudeCodeToken) -> str:
-        self._access_token = token.access_token
-        self._expires_at = token.expires_at
-        return token.access_token
-
-    def _load_store(self, errors: list[str]) -> StoredClaudeCodeToken | None:
-        try:
-            return self._token_store.load()
-        except ValueError as exc:
-            errors.append(str(exc))
-            return None
-
-    def _load_credentials(self, errors: list[str]) -> StoredClaudeCodeToken | None:
-        if not self._settings.allow_claude_code_fallback:
-            return None
-        try:
-            return self._credentials.load()
-        except ValueError as exc:
-            errors.append(str(exc))
-            return None
-
-    async def _refresh(self, refresh_token: str) -> StoredClaudeCodeToken:
+    async def _refresh(self, token: StoredClaudeCodeToken) -> StoredClaudeCodeToken:
         payload = {
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
+            "refresh_token": token.refresh_token,
             "client_id": self._settings.oauth_client_id,
         }
         async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
@@ -137,13 +142,15 @@ class ClaudeCodeTokenManager:
         next_refresh_token = data.get("refresh_token")
         if next_refresh_token is not None and not isinstance(next_refresh_token, str):
             raise RuntimeError("OAuth refresh returned invalid refresh_token")
+        now = datetime.now(tz=UTC)
         return StoredClaudeCodeToken(
+            id=token.id,
             access_token=access_token,
-            refresh_token=next_refresh_token or refresh_token,
-            expires_at=datetime.now(tz=UTC) + timedelta(seconds=float(expires_in)),
+            refresh_token=next_refresh_token or token.refresh_token,
+            expires_at=now + timedelta(seconds=float(expires_in)),
             source="oauth_refresh",
             client_id=self._settings.oauth_client_id,
-            created_at=datetime.now(tz=UTC),
+            created_at=token.created_at,
         )
 
 
@@ -155,50 +162,88 @@ class ClaudeCodeProxyService:
         self._tokens = ClaudeCodeTokenManager(settings)
 
     async def forward_json(self, request: ClaudeCodeRequest) -> tuple[bytes, str]:
-        token = await self._tokens.get_token()
         payload = self._build_upstream_request(request)
-        async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
-            response = await client.post(
-                f"{self._settings.anthropic_base_url}/v1/messages",
-                headers=self._headers(token, request),
-                json=payload,
-            )
-        if response.status_code >= 400:
-            raise ClaudeCodeUpstreamError(
+        last_upstream: ClaudeCodeUpstreamError | None = None
+        while True:
+            try:
+                token, token_id = await self._tokens.acquire()
+            except ClaudeCodeTokenUnavailableError:
+                # Every token was benched on upstream auth failures: surface the real
+                # upstream error rather than an opaque "no token available" 503.
+                if last_upstream is not None:
+                    raise last_upstream from None
+                raise
+            async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
+                response = await client.post(
+                    f"{self._settings.anthropic_base_url}/v1/messages",
+                    headers=self._headers(token, request),
+                    json=payload,
+                )
+            if response.status_code < 400:
+                return response.content, response.headers.get("content-type", "application/json")
+            error = ClaudeCodeUpstreamError(
                 status_code=response.status_code,
                 body=response.content,
                 media_type=response.headers.get("content-type", "application/json"),
             )
-        return response.content, response.headers.get("content-type", "application/json")
+            if self._should_failover(token_id, response.status_code):
+                self._tokens.mark_failed(token_id)
+                last_upstream = error
+                continue
+            raise error
 
     async def open_stream(
         self,
         request: ClaudeCodeRequest,
     ) -> tuple[httpx.AsyncClient, httpx.Response]:
-        token = await self._tokens.get_token()
         payload = self._build_upstream_request(request)
-        client = httpx.AsyncClient(timeout=self._settings.request_timeout)
-        try:
-            upstream_request = client.build_request(
-                "POST",
-                f"{self._settings.anthropic_base_url}/v1/messages",
-                headers=self._headers(token, request),
-                json=payload,
-            )
-            response = await client.send(upstream_request, stream=True)
-            if response.status_code >= 400:
-                body = await response.aread()
-                await response.aclose()
-                await client.aclose()
-                raise ClaudeCodeUpstreamError(
-                    status_code=response.status_code,
-                    body=body,
-                    media_type=response.headers.get("content-type", "application/json"),
+        last_upstream: ClaudeCodeUpstreamError | None = None
+        while True:
+            try:
+                token, token_id = await self._tokens.acquire()
+            except ClaudeCodeTokenUnavailableError:
+                if last_upstream is not None:
+                    raise last_upstream from None
+                raise
+            client = httpx.AsyncClient(timeout=self._settings.request_timeout)
+            try:
+                upstream_request = client.build_request(
+                    "POST",
+                    f"{self._settings.anthropic_base_url}/v1/messages",
+                    headers=self._headers(token, request),
+                    json=payload,
                 )
-            return client, response
-        except Exception:
+                response = await client.send(upstream_request, stream=True)
+            except Exception:
+                await client.aclose()
+                raise
+            if response.status_code < 400:
+                return client, response
+            body = await response.aread()
+            await response.aclose()
             await client.aclose()
-            raise
+            error = ClaudeCodeUpstreamError(
+                status_code=response.status_code,
+                body=body,
+                media_type=response.headers.get("content-type", "application/json"),
+            )
+            if self._should_failover(token_id, response.status_code):
+                self._tokens.mark_failed(token_id)
+                last_upstream = error
+                continue
+            raise error
+
+    @staticmethod
+    def _should_failover(token_id: str, status_code: int) -> bool:
+        """Whether to bench this token and retry with the next one.
+
+        The env/--access-token bypass has no alternate token, so it never fails over.
+        Whether another usable token actually exists is decided by the next acquire()
+        (which raises ClaudeCodeTokenUnavailableError when none remains) -- this avoids
+        a lock-free global token count that races under concurrency.
+        """
+
+        return token_id != ENV_ACCESS_TOKEN_ID and status_code in FAILOVER_STATUS_CODES
 
     def _headers(self, token: str, request: ClaudeCodeRequest) -> dict[str, str]:
         headers = {

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-import os
 import sys
 import webbrowser
 
@@ -15,61 +14,65 @@ from chat_agent.timezone_utils import configure_runtime_timezone
 
 from .app import create_app
 from .auth import (
-    ClaudeCodeCredentialLoader,
     ClaudeCodeOAuthClient,
-    ClaudeCodeTokenStore,
-    resolve_credentials_path,
-    resolve_token_path,
+    StoredClaudeCodeTokenStore,
 )
 from .settings import ClaudeCodeProxySettings
 
+OVERVIEW_EPILOG = """\
+commands:
+  serve                  Start the proxy (default when no command is given)
+  login                  Browser OAuth login; repeat to add more accounts
+  tokens                 Manage stored tokens (list / promote / remove)
 
-def build_serve_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="claude-code-proxy")
-    parser.add_argument("--host", help="Bind host")
-    parser.add_argument("--port", type=int, help="Bind port")
-    parser.add_argument(
-        "--token-path",
-        help="Override proxy token store path (defaults to platform config dir).",
-    )
-    parser.add_argument(
-        "--credentials-path",
-        help="Override Claude Code credentials path.",
-    )
-    return parser
+examples:
+  claude-code-proxy login                  Log in a Claude account
+  claude-code-proxy login                  Run again to add a second account
+  claude-code-proxy tokens list            Show stored tokens, highest priority first
+  claude-code-proxy tokens promote <id>    Make a token the highest priority
+  claude-code-proxy serve                  Serve on http://127.0.0.1:4142
+  claude-code-proxy serve --port 4200      Serve on a custom port
+
+Multiple logins provide failover: serve normally uses the highest-priority token
+and only switches to the next one when the upstream returns 401/403. Priority
+defaults to the newest login and can be changed with `tokens promote`.
+Run `claude-code-proxy <command> --help` for command-specific flags.
+"""
+
+SERVE_EPILOG = """\
+examples:
+  claude-code-proxy serve
+  claude-code-proxy serve --host 0.0.0.0 --port 4200
+  claude-code-proxy serve --access-token sk-ant-...   # bypass the token store
+
+Any flag left unset falls back to its CLAUDE_CODE_PROXY_* environment variable,
+then to a built-in default.
+"""
+
+LOGIN_EPILOG = """\
+Opens the Claude authorization URL in your browser, then asks you to paste back the
+`code#state` value Anthropic shows on the callback page. The resulting token is
+appended to the store; run this again to add more accounts for failover.
+"""
 
 
-def build_login_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="claude-code-proxy login")
-    parser.add_argument(
-        "--token-path",
-        help="Override proxy token store path (defaults to platform config dir).",
+def _add_common_oauth_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--oauth-client-id", help="Override Claude OAuth client ID.")
+    parser.add_argument("--oauth-scope", help="Override Claude OAuth scope string.")
+
+
+def build_overview_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claude-code-proxy",
+        description="Local proxy that forwards Claude Code requests upstream to Anthropic.",
+        epilog=OVERVIEW_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--credentials-path",
-        help="Override Claude Code credentials path for `--from-claude-code`.",
-    )
-    parser.add_argument(
-        "--client-id",
-        help="Override Claude OAuth client ID.",
-    )
-    parser.add_argument(
-        "--scope",
-        help="Override Claude OAuth scope string.",
-    )
-    parser.add_argument(
-        "--code",
-        help="Paste the manual Anthropic callback code in `code#state` format.",
-    )
-    parser.add_argument(
-        "--from-claude-code",
-        action="store_true",
-        help="Import existing Claude Code credentials instead of running browser OAuth.",
-    )
-    parser.add_argument(
-        "--no-open-browser",
-        action="store_true",
-        help="Do not attempt to open the authorization URL automatically.",
+        "command",
+        nargs="?",
+        choices=["serve", "login", "tokens"],
+        help="Subcommand to run (default: serve).",
     )
     return parser
 
@@ -82,48 +85,116 @@ def _build_oauth_client(settings: ClaudeCodeProxySettings) -> ClaudeCodeOAuthCli
     )
 
 
-def _load_login_settings(args: argparse.Namespace) -> ClaudeCodeProxySettings:
-    settings = ClaudeCodeProxySettings.for_login_from_env()
-    if args.token_path:
-        settings = replace(settings, token_path=resolve_token_path(args.token_path))
-    if args.credentials_path:
-        settings = replace(
-            settings,
-            credentials_path=resolve_credentials_path(args.credentials_path),
-        )
-    if args.client_id:
-        settings = replace(settings, oauth_client_id=args.client_id)
-    if args.scope:
-        settings = replace(settings, oauth_scope=args.scope)
+def build_serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claude-code-proxy serve",
+        description="Start the proxy server. Uses stored OAuth tokens with 401/403 failover.",
+        epilog=SERVE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--host", help="Bind host")
+    parser.add_argument("--port", type=int, help="Bind port")
+    parser.add_argument("--request-timeout", type=float, help="Upstream request timeout (s).")
+    parser.add_argument("--anthropic-base-url", help="Upstream Anthropic API base URL.")
+    parser.add_argument("--anthropic-version", help="Anthropic API version header.")
+    parser.add_argument("--beta-headers", help="Comma-separated anthropic-beta header values.")
+    parser.add_argument("--required-system-prompt", help="Required system prompt to prepend.")
+    parser.add_argument("--user-agent", help="User-Agent header for upstream requests.")
+    parser.add_argument(
+        "--access-token",
+        help="Bypass the OAuth token store and use this access token directly.",
+    )
+    _add_common_oauth_flags(parser)
+    return parser
+
+
+def build_login_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claude-code-proxy login",
+        description="Browser OAuth login. Appends a token to the store; repeat to add accounts.",
+        epilog=LOGIN_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--request-timeout", type=float, help="OAuth HTTP timeout (s).")
+    _add_common_oauth_flags(parser)
+    parser.add_argument(
+        "--code",
+        help="Paste the manual Anthropic callback code in `code#state` format.",
+    )
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="Do not attempt to open the authorization URL automatically.",
+    )
+    return parser
+
+
+def build_tokens_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claude-code-proxy tokens",
+        description=(
+            "Manage stored OAuth tokens. Priority is newest-first; serve uses the top "
+            "one and fails over on 401/403."
+        ),
+    )
+    sub = parser.add_subparsers(dest="tokens_action", required=True)
+    sub.add_parser("list", help="List stored tokens (newest first).")
+    promote = sub.add_parser("promote", help="Move a token to the front of the priority order.")
+    promote.add_argument("id", help="Token id to promote.")
+    remove = sub.add_parser("remove", help="Delete a stored token.")
+    remove.add_argument("id", help="Token id to remove.")
+    return parser
+
+
+def _settings_from_serve_args(args: argparse.Namespace) -> ClaudeCodeProxySettings:
+    # Every flag defaults to None when unset; use `is not None` so explicit falsy
+    # values (--port 0, --request-timeout 0, --beta-headers "") are honored.
+    settings = ClaudeCodeProxySettings.from_env()
+    if args.host is not None:
+        settings = replace(settings, host=args.host)
+    if args.port is not None:
+        settings = replace(settings, port=args.port)
+    if args.request_timeout is not None:
+        settings = replace(settings, request_timeout=args.request_timeout)
+    if args.anthropic_base_url is not None:
+        settings = replace(settings, anthropic_base_url=args.anthropic_base_url.rstrip("/"))
+    if args.anthropic_version is not None:
+        settings = replace(settings, anthropic_version=args.anthropic_version)
+    if args.beta_headers is not None:
+        settings = replace(settings, beta_headers=args.beta_headers)
+    if args.required_system_prompt is not None:
+        settings = replace(settings, required_system_prompt=args.required_system_prompt)
+    if args.user_agent is not None:
+        settings = replace(settings, user_agent=args.user_agent)
+    if args.access_token is not None:
+        settings = replace(settings, access_token=args.access_token)
+    if args.oauth_client_id is not None:
+        settings = replace(settings, oauth_client_id=args.oauth_client_id)
+    if args.oauth_scope is not None:
+        settings = replace(settings, oauth_scope=args.oauth_scope)
     return settings
 
 
-def _run_login_from_claude_code(settings: ClaudeCodeProxySettings) -> int:
-    token = ClaudeCodeCredentialLoader(path=settings.credentials_path).load()
-    if token is None:
-        path_detail = (
-            str(settings.credentials_path)
-            if settings.credentials_path is not None
-            else "default Claude Code credentials locations"
-        )
-        raise RuntimeError(f"No Claude Code credentials found in {path_detail}.")
-    ClaudeCodeTokenStore(settings.token_path).save(token)
-    print(
-        "Imported Claude Code credentials\n"
-        f"Token path: {settings.token_path}",
-        flush=True,
-    )
-    return 0
+def _settings_from_login_args(args: argparse.Namespace) -> ClaudeCodeProxySettings:
+    settings = ClaudeCodeProxySettings.for_login_from_env()
+    if args.request_timeout is not None:
+        settings = replace(settings, request_timeout=args.request_timeout)
+    if args.oauth_client_id is not None:
+        settings = replace(settings, oauth_client_id=args.oauth_client_id)
+    if args.oauth_scope is not None:
+        settings = replace(settings, oauth_scope=args.oauth_scope)
+    return settings
 
 
-def _run_browser_login(settings: ClaudeCodeProxySettings, args: argparse.Namespace) -> int:
+def _run_browser_login(
+    settings: ClaudeCodeProxySettings, args: argparse.Namespace
+) -> int:
     oauth = _build_oauth_client(settings)
     authorization = oauth.begin_authorization()
 
     print(
         "Claude browser OAuth login\n"
         f"Authorization URL: {authorization.authorization_url}\n"
-        f"Token path: {settings.token_path}\n"
         "After approving in your browser, Anthropic will show a code in `code#state` format.",
         flush=True,
     )
@@ -139,20 +210,15 @@ def _run_browser_login(settings: ClaudeCodeProxySettings, args: argparse.Namespa
         print("Canceled.", file=sys.stderr)
         return 130
 
-    token = oauth.exchange_manual_code(
-        manual_code,
-        authorization=authorization,
-    )
-    ClaudeCodeTokenStore(settings.token_path).save(token)
-    print(f"Saved Claude OAuth token to {settings.token_path}", flush=True)
+    token = oauth.exchange_manual_code(manual_code, authorization=authorization)
+    StoredClaudeCodeTokenStore().save(token)
+    print(f"Saved Claude OAuth token (id={token.id}) to {token_store_path()}", flush=True)
     return 0
 
 
 def run_login(args: argparse.Namespace) -> int:
-    settings = _load_login_settings(args)
+    settings = _settings_from_login_args(args)
     try:
-        if args.from_claude_code:
-            return _run_login_from_claude_code(settings)
         return _run_browser_login(settings, args)
     except (RuntimeError, ValueError) as exc:
         print(str(exc), file=sys.stderr, flush=True)
@@ -161,15 +227,7 @@ def run_login(args: argparse.Namespace) -> int:
 
 def run_serve(args: argparse.Namespace) -> None:
     configure_runtime_timezone(load_app_timezone())
-    if args.token_path:
-        os.environ["CLAUDE_CODE_PROXY_TOKEN_PATH"] = args.token_path
-    if args.credentials_path:
-        os.environ["CLAUDE_CODE_PROXY_CREDENTIALS_PATH"] = args.credentials_path
-    settings = ClaudeCodeProxySettings.from_env()
-    if args.host:
-        settings = replace(settings, host=args.host)
-    if args.port:
-        settings = replace(settings, port=args.port)
+    settings = _settings_from_serve_args(args)
     uvicorn.run(
         create_app(settings),
         host=settings.host,
@@ -178,14 +236,60 @@ def run_serve(args: argparse.Namespace) -> None:
     )
 
 
+def run_tokens(args: argparse.Namespace) -> int:
+    store = StoredClaudeCodeTokenStore()
+    if args.tokens_action == "list":
+        tokens = store.load_all()
+        if not tokens:
+            print("No tokens stored. Run `claude-code-proxy login` first.")
+            return 0
+        for token in tokens:
+            print(
+                f"{token.id}  source={token.source}  expires_at={token.expires_at.isoformat()}"
+            )
+        return 0
+    if args.tokens_action == "promote":
+        if store.promote(args.id):
+            print(f"Promoted token {args.id}.")
+            return 0
+        print(f"No token with id {args.id}.", file=sys.stderr)
+        return 1
+    # Remaining action is "remove" (the subparser is required with fixed choices).
+    if store.remove(args.id):
+        print(f"Removed token {args.id}.")
+        return 0
+    print(f"No token with id {args.id}.", file=sys.stderr)
+    return 1
+
+
+def token_store_path() -> str:
+    return str(StoredClaudeCodeTokenStore().path)
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    if argv and argv[0] == "login":
+    if not argv:
+        args = build_serve_parser().parse_args([])
+        run_serve(args)
+        return
+
+    head = argv[0]
+    if head in ("-h", "--help"):
+        # Top-level help: show the command overview and usage examples, then exit.
+        build_overview_parser().parse_args(["--help"])
+        return
+    if head == "serve":
+        args = build_serve_parser().parse_args(argv[1:])
+        run_serve(args)
+        return
+    if head == "login":
         args = build_login_parser().parse_args(argv[1:])
         raise SystemExit(run_login(args))
+    if head == "tokens":
+        args = build_tokens_parser().parse_args(argv[1:])
+        raise SystemExit(run_tokens(args))
 
-    if argv and argv[0] == "serve":
-        argv = argv[1:]
+    # Backward-compat: bare flags (no subcommand) are treated as `serve`.
     args = build_serve_parser().parse_args(argv)
     run_serve(args)
 

@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
-from pathlib import Path
 
 from .auth import (
     DEFAULT_CLAUDE_CODE_OAUTH_CLIENT_ID,
     DEFAULT_CLAUDE_CODE_OAUTH_SCOPE,
-    resolve_credentials_path,
-    resolve_token_path,
 )
 
 DEFAULT_REQUIRED_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -30,17 +27,8 @@ def _env(*names: str) -> str | None:
     return None
 
 
-def _env_bool(name: str, *, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 @dataclass(frozen=True)
 class ClaudeCodeProxySettings:
-    token_path: Path = field(default_factory=resolve_token_path)
-    credentials_path: Path | None = field(default_factory=resolve_credentials_path)
     host: str = "127.0.0.1"
     port: int = 4142
     request_timeout: float = 120.0
@@ -52,7 +40,6 @@ class ClaudeCodeProxySettings:
     required_system_prompt: str = DEFAULT_REQUIRED_SYSTEM_PROMPT
     user_agent: str = "chat-agent-claude-code-proxy/0.1.0"
     access_token: str | None = None
-    allow_claude_code_fallback: bool = False
 
     @classmethod
     def from_env(cls) -> "ClaudeCodeProxySettings":
@@ -68,8 +55,6 @@ class ClaudeCodeProxySettings:
         user_agent = _env("CLAUDE_CODE_PROXY_USER_AGENT") or "chat-agent-claude-code-proxy/0.1.0"
         access_token = _env("CLAUDE_CODE_PROXY_ACCESS_TOKEN", "CLAUDE_CODE_ACCESS_TOKEN")
         return cls(
-            token_path=settings.token_path,
-            credentials_path=settings.credentials_path,
             host=settings.host,
             port=settings.port,
             request_timeout=settings.request_timeout,
@@ -81,7 +66,6 @@ class ClaudeCodeProxySettings:
             required_system_prompt=required_system_prompt,
             user_agent=user_agent,
             access_token=access_token,
-            allow_claude_code_fallback=settings.allow_claude_code_fallback,
         )
 
     @classmethod
@@ -89,21 +73,14 @@ class ClaudeCodeProxySettings:
         host = _env("CLAUDE_CODE_PROXY_HOST") or "127.0.0.1"
         port = int(_env("CLAUDE_CODE_PROXY_PORT") or "4142")
         request_timeout = float(_env("CLAUDE_CODE_PROXY_REQUEST_TIMEOUT") or "120")
-        credentials_path = resolve_credentials_path(_env("CLAUDE_CODE_PROXY_CREDENTIALS_PATH"))
-        token_path = resolve_token_path(_env("CLAUDE_CODE_PROXY_TOKEN_PATH"))
         oauth_client_id = _env("CLAUDE_CODE_PROXY_CLIENT_ID") or DEFAULT_CLAUDE_CODE_OAUTH_CLIENT_ID
         oauth_scope = _env("CLAUDE_CODE_PROXY_SCOPE") or DEFAULT_CLAUDE_CODE_OAUTH_SCOPE
-        allow_claude_code_fallback = _env_bool(
-            "CLAUDE_CODE_PROXY_ENABLE_CLAUDE_CODE_FALLBACK",
-            default=credentials_path is not None,
-        )
+        access_token = _env("CLAUDE_CODE_PROXY_ACCESS_TOKEN", "CLAUDE_CODE_ACCESS_TOKEN")
         return cls(
-            token_path=token_path,
-            credentials_path=credentials_path,
             host=host,
             port=port,
             request_timeout=request_timeout,
             oauth_client_id=oauth_client_id,
             oauth_scope=oauth_scope,
-            allow_claude_code_fallback=allow_claude_code_fallback,
+            access_token=access_token,
         )

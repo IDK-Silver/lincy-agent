@@ -9,7 +9,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from chat_agent.llm.schema import ClaudeCodeRequest
 
-from .service import ClaudeCodeProxyService, ClaudeCodeUpstreamError
+from .service import (
+    ClaudeCodeProxyService,
+    ClaudeCodeTokenUnavailableError,
+    ClaudeCodeUpstreamError,
+)
 from .settings import ClaudeCodeProxySettings
 
 
@@ -51,6 +55,8 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
                 status_code=exc.status_code,
                 media_type=exc.media_type,
             )
+        except ClaudeCodeTokenUnavailableError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
