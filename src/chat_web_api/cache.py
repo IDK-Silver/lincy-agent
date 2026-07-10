@@ -26,6 +26,7 @@ _READ_CACHE_MEASURABLE_PROVIDERS = frozenset(
         "codex",
         "copilot",
         "deepseek",
+        "grok",
         "openai",
         "openrouter",
     }
@@ -340,6 +341,29 @@ class MetricsCache:
             pricing_stale=_has_stale_pricing(responses),
         )
 
+    def _date_in_range(self, value: date, date_from: date, date_to: date) -> bool:
+        return date_from <= value <= date_to
+
+    def _session_activity_in_range(
+        self, session_id: str, date_from: date, date_to: date
+    ) -> bool:
+        """True when the session had turn/response activity (or was created) in range.
+
+        Cross-midnight sessions must still appear on days they are active, not
+        only on the create day.
+        """
+        for rm in self._responses.get(session_id, []):
+            if self._date_in_range(rm.ts.date(), date_from, date_to):
+                return True
+        for tm in self._turns.get(session_id, []):
+            if self._date_in_range(tm.ts_started.date(), date_from, date_to):
+                return True
+        sf = self._files.get(session_id)
+        if sf is not None and sf.meta is not None:
+            if self._date_in_range(sf.meta.created_at.date(), date_from, date_to):
+                return True
+        return False
+
     def get_sessions_in_range(
         self, date_from: date, date_to: date
     ) -> list[SessionSummary]:
@@ -347,13 +371,13 @@ class MetricsCache:
         for sid, sf in self._files.items():
             if sf.meta is None:
                 continue
-            created = sf.meta.created_at.date()
-            if created < date_from or created > date_to:
+            if not self._session_activity_in_range(sid, date_from, date_to):
                 continue
             summary = self.get_session_summary(sid)
             if summary:
                 results.append(summary)
-        results.sort(key=lambda s: s.created_at, reverse=True)
+        # Most recently active first so the current multi-day session is on top.
+        results.sort(key=lambda s: s.updated_at, reverse=True)
         return results
 
     def get_dashboard(self, date_from: date, date_to: date) -> DashboardSummary:
@@ -366,20 +390,10 @@ class MetricsCache:
         total_cw = 0
         daily: dict[date, dict] = {}
 
-        for s in sessions:
-            session_responses = self._responses.get(s.session_id, [])
-            all_responses.extend(session_responses)
-            if s.total_cost is not None:
-                total_cost += s.total_cost
-            total_turns += s.turn_count
-            total_prompt += s.total_prompt_tokens
-            total_cr += s.total_cache_read
-            total_cw += s.total_cache_write
-            # Daily aggregation by session created date
-            d = s.created_at.date()
-            if d not in daily:
-                daily[d] = {
-                    "date": d.isoformat(),
+        def _daily_bucket(day: date) -> dict:
+            if day not in daily:
+                daily[day] = {
+                    "date": day.isoformat(),
                     "cost": 0.0,
                     "turns": 0,
                     "prompt_tokens": 0,
@@ -388,23 +402,43 @@ class MetricsCache:
                     "read_cache_measurable": True,
                     "write_cache_measurable": True,
                     "pricing_stale": False,
+                    "_responses": [],
                 }
-            if s.total_cost is not None:
-                daily[d]["cost"] += s.total_cost
-            daily[d]["turns"] += s.turn_count
-            daily[d]["prompt_tokens"] += s.total_prompt_tokens
-            daily[d]["cache_read"] += s.total_cache_read
-            daily[d]["cache_write"] += s.total_cache_write
-            daily[d]["read_cache_measurable"] = (
-                daily[d]["read_cache_measurable"]
-                and _aggregate_read_cache_measurable(self._responses.get(s.session_id, []))
-            )
-            daily[d]["write_cache_measurable"] = (
-                daily[d]["write_cache_measurable"] and s.write_cache_measurable
-            )
-            daily[d]["pricing_stale"] = (
-                daily[d]["pricing_stale"] or s.pricing_stale
-            )
+            return daily[day]
+
+        for s in sessions:
+            # Count only turns/responses that actually fell inside the window.
+            for tm in self._turns.get(s.session_id, []):
+                day = tm.ts_started.date()
+                if not self._date_in_range(day, date_from, date_to):
+                    continue
+                total_turns += 1
+                bucket = _daily_bucket(day)
+                bucket["turns"] += 1
+
+            for rm in self._responses.get(s.session_id, []):
+                day = rm.ts.date()
+                if not self._date_in_range(day, date_from, date_to):
+                    continue
+                all_responses.append(rm)
+                total_prompt += rm.prompt_tokens
+                total_cr += rm.cache_read_tokens
+                total_cw += rm.cache_write_tokens
+                if rm.cost is not None:
+                    total_cost += rm.cost
+                bucket = _daily_bucket(day)
+                bucket["prompt_tokens"] += rm.prompt_tokens
+                bucket["cache_read"] += rm.cache_read_tokens
+                bucket["cache_write"] += rm.cache_write_tokens
+                if rm.cost is not None:
+                    bucket["cost"] += rm.cost
+                bucket["_responses"].append(rm)
+                bucket["pricing_stale"] = bucket["pricing_stale"] or rm.pricing_stale
+
+        for bucket in daily.values():
+            rows: list[ResponseMetrics] = bucket.pop("_responses")
+            bucket["read_cache_measurable"] = _aggregate_read_cache_measurable(rows)
+            bucket["write_cache_measurable"] = _aggregate_write_cache_measurable(rows)
 
         hit_rate = total_cr / (total_cr + total_cw) if (total_cr + total_cw) > 0 else None
 
@@ -416,10 +450,7 @@ class MetricsCache:
                 measurable=row["read_cache_measurable"],
             )
 
-        dashboard_read_cache_measurable = all(
-            _aggregate_read_cache_measurable(self._responses.get(s.session_id, []))
-            for s in sessions
-        ) if sessions else False
+        dashboard_read_cache_measurable = _aggregate_read_cache_measurable(all_responses)
 
         return DashboardSummary(
             date_from=date_from,
@@ -436,9 +467,7 @@ class MetricsCache:
             total_cache_read=total_cr,
             total_cache_write=total_cw,
             cache_hit_rate=hit_rate,
-            write_cache_measurable=all(
-                s.write_cache_measurable for s in sessions
-            ) if sessions else False,
+            write_cache_measurable=_aggregate_write_cache_measurable(all_responses),
             daily_costs=daily_list,
             pricing_sources=_aggregate_pricing_sources(all_responses),
             pricing_stale=_has_stale_pricing(all_responses),
@@ -477,16 +506,21 @@ class MetricsCache:
     def get_all_requests(
         self, date_from: date, date_to: date
     ) -> list[dict]:
-        """Return all response records across sessions in date range, sorted by time."""
+        """Return response records by response timestamp, newest first.
+
+        Filtering is on each request's own ``ts`` (not session create day), so a
+        multi-day session still contributes its recent Grok/Claude calls when the
+        UI range is "today" or "7d". Newest-first matches the monitor page which
+        only loads the first page (limit 500).
+        """
         results: list[dict] = []
         for sid, sf in self._files.items():
             if sf.meta is None:
                 continue
-            created = sf.meta.created_at.date()
-            if created < date_from or created > date_to:
-                continue
             session_label = sf.meta.created_at.strftime("%m/%d %H:%M")
             for rm in self._responses.get(sid, []):
+                if not self._date_in_range(rm.ts.date(), date_from, date_to):
+                    continue
                 results.append({
                     "ts": rm.ts.isoformat(),
                     "session_id": sid,
@@ -512,7 +546,7 @@ class MetricsCache:
                     "pricing_source_url": rm.pricing_source_url,
                     "pricing_stale": rm.pricing_stale,
                 })
-        results.sort(key=lambda r: r["ts"])
+        results.sort(key=lambda r: r["ts"], reverse=True)
         return results
 
     def get_live_status(self, soft_limit: int) -> dict | None:

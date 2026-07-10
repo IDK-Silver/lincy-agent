@@ -158,3 +158,70 @@ def test_all_requests_reports_ollama_read_cache_rate_unavailable():
     rows = cache.get_all_requests(date(2026, 4, 11), date(2026, 4, 11))
 
     assert rows[0]["read_cache_rate"] is None
+
+
+def test_all_requests_filters_by_response_ts_not_session_created():
+    """Multi-day sessions must still surface recent requests (e.g. grok)."""
+    cache = MetricsCache(Path("/tmp"), {})
+    created = datetime(2026, 7, 10, 3, 0, tzinfo=UTC)
+    cache._files["s1"] = SessionFiles(
+        session_dir=Path("/tmp/s1"),
+        meta=SessionMetadata(
+            session_id="s1",
+            user_id="u1",
+            display_name="User",
+            created_at=created,
+            updated_at=datetime(2026, 7, 11, 1, 0, tzinfo=UTC),
+            status="active",
+        ),
+    )
+    cache._responses["s1"] = [
+        ResponseMetrics(
+            ts=datetime(2026, 7, 10, 6, 0, tzinfo=UTC),
+            round=1,
+            provider="claude_code",
+            model="claude-opus-4-8",
+            prompt_tokens=100,
+            completion_tokens=10,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            latency_ms=10,
+            cost=0.1,
+            turn_id="turn_000001",
+        ),
+        ResponseMetrics(
+            ts=datetime(2026, 7, 11, 1, 5, tzinfo=UTC),
+            round=1,
+            provider="grok",
+            model="grok-4.5",
+            prompt_tokens=200,
+            completion_tokens=20,
+            cache_read_tokens=150,
+            cache_write_tokens=0,
+            latency_ms=20,
+            cost=0.2,
+            turn_id="turn_000002",
+        ),
+    ]
+
+    today_only = cache.get_all_requests(date(2026, 7, 11), date(2026, 7, 11))
+    assert len(today_only) == 1
+    assert today_only[0]["provider"] == "grok"
+    assert today_only[0]["model"] == "grok-4.5"
+    assert today_only[0]["read_cache_rate"] == 0.75
+
+    # Newest first: grok before older claude call.
+    week = cache.get_all_requests(date(2026, 7, 5), date(2026, 7, 11))
+    assert [r["provider"] for r in week] == ["grok", "claude_code"]
+
+    sessions = cache.get_sessions_in_range(date(2026, 7, 11), date(2026, 7, 11))
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "s1"
+
+    dash = cache.get_dashboard(date(2026, 7, 11), date(2026, 7, 11))
+    assert dash.total_sessions == 1
+    assert dash.total_turns == 0  # no turns recorded in fixture
+    assert dash.total_prompt_tokens == 200
+    assert dash.total_cost == 0.2
+    assert dash.daily_costs[0]["date"] == "2026-07-11"
+    assert dash.daily_costs[0]["prompt_tokens"] == 200
