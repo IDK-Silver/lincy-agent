@@ -1,0 +1,19 @@
+provider: grok
+model: grok-4.5
+
+# Points at the local SuperGrok OAuth proxy root (/v1).
+# Auth is handled by: uv run grok-proxy login
+base_url: http://localhost:4144/v1
+
+max_tokens: 65536
+request_timeout: 600.0
+temperature: null
+vision: true
+
+reasoning:
+  enabled: true
+  effort: high
+  supported_efforts:
+    - low
+    - medium
+    - high

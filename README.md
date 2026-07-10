@@ -79,6 +79,31 @@ uv run claude-code-proxy serve
 
 serve 端所有設定都有對應 CLI flag（`--host` / `--port` / `--anthropic-base-url` / `--anthropic-version` / `--beta-headers` / `--required-system-prompt` / `--user-agent` / `--request-timeout` / `--access-token`，見 `claude-code-proxy serve --help`）。未給的 flag 會沿用同名 `CLAUDE_CODE_PROXY_*` 環境變數，再退回內建預設。`--access-token`（或 `CLAUDE_CODE_PROXY_ACCESS_TOKEN`）會**略過 token store 直接使用該 token**，不 failover、不 refresh。
 
+如果要使用 SuperGrok / X Premium+ 訂閱走 OAuth（不需 `XAI_API_KEY`），用獨立 `grok-proxy`：
+
+```bash
+# 1. Device-code OAuth login（開瀏覽器，或 SSH 下手動開 URL）
+uv run grok-proxy login
+
+# 2. 啟動 proxy on http://127.0.0.1:4144
+uv run grok-proxy serve
+```
+
+`login` 走 xAI device flow：印出 verification URL + user code，授權後把 access/refresh token 存到平台設定目錄（macOS：`~/Library/Application Support/chat-agent/grok-proxy/token.json`）。`serve` 會自動 refresh 短命 access token，並把請求 pass-through 到 `https://api.x.ai/v1`（`/v1/chat/completions`、`/v1/responses`、`/v1/models`）。
+
+| 命令 | 說明 |
+|------|------|
+| `grok-proxy login` | SuperGrok device-code 登入 |
+| `grok-proxy serve` | 啟動 proxy（不帶命令時的預設行為） |
+
+Headless / SSH 可加 `--no-open-browser`。若 OAuth 登入成功但 inference 回 403，可能是 xAI tier allowlist；可改走 `XAI_API_KEY` 或 OpenRouter。
+
+`cfgs/supervisor.yaml` 的 `grok-proxy` 為 `enabled: auto`：當任一 agent 的 `llm` / `llm_fallbacks` 使用 `provider: grok` 時會自動啟動。手動測可把 agent `llm` 切到：
+
+- `cfgs/llm/grok/grok-4.5/thinking.yaml` 或 `low-thinking.yaml`
+- `cfgs/llm/grok/grok-4.3/thinking.yaml` 或 `no-thinking.yaml`
+- `cfgs/llm/grok/grok-build-0.1/thinking.yaml`
+
 如果要使用 Codex provider，先用官方 Codex CLI 登入，讓 `~/.codex/auth.json` 存在。`codex-proxy` 只讀這個預設 auth 檔，不維護自己的 token store：
 
 ```bash
@@ -141,6 +166,7 @@ repo 內的 `.secrets.baseline` 已關閉噪音很高的 `KeywordDetector`，避
 - Copilot model profiles: `cfgs/llm/copilot/`
 - Codex model profiles: `cfgs/llm/codex/`
 - Claude Code model profiles: `cfgs/llm/claude_code/`
+- Grok (SuperGrok OAuth) model profiles: `cfgs/llm/grok/`
 
 ## 疑難排解
 

@@ -1,0 +1,19 @@
+provider: grok
+model: grok-4.3
+
+# Local SuperGrok OAuth proxy (uv run grok-proxy login && serve).
+base_url: http://localhost:4144/v1
+
+max_tokens: 65536
+request_timeout: 120.0
+temperature: null
+vision: true
+
+# Request no extra reasoning. Adapter sends reasoning_effort=none.
+reasoning:
+  enabled: false
+  supported_efforts:
+    - none
+    - low
+    - medium
+    - high

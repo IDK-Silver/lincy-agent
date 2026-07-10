@@ -103,6 +103,7 @@ _READ_CACHE_MEASURABLE_PROVIDERS = frozenset(
         "codex",
         "copilot",
         "deepseek",
+        "grok",
         "openai",
         "openrouter",
     }

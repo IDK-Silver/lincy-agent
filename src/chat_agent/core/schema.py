@@ -556,6 +556,85 @@ class ClaudeCodeConfig(LLMProviderConfig):
         return ClaudeCodeClient(self)
 
 
+class GrokReasoningConfig(StrictConfigModel):
+    """Grok Chat Completions reasoning config.
+
+    xAI Chat Completions uses top-level reasoning_effort string.
+    Responses API uses reasoning: {"effort": ...} object — not used here.
+    See docs/dev/provider-api-spec.md.
+    """
+
+    enabled: bool | None = None
+    effort: Literal["none", "low", "medium", "high", "xhigh"] | None = None
+    supported_efforts: list[str] = Field(default_factory=list)
+
+
+class GrokConfig(LLMProviderConfig):
+    """Grok via local SuperGrok OAuth proxy (OpenAI-compatible chat completions).
+
+    Auth is handled by grok-proxy (device-code OAuth). The client only talks
+    to the local proxy; no XAI_API_KEY is required on this path.
+    See docs/dev/provider-api-spec.md.
+    """
+
+    provider: Literal["grok"] = "grok"
+    model: str
+    base_url: str = "http://localhost:4144/v1"
+    max_tokens: int | None = Field(default=None, ge=1)
+    request_timeout: float = Field(default=120.0, gt=0)
+    temperature: float | None = Field(default=None, ge=0.0)
+    vision: bool = True
+    reasoning: GrokReasoningConfig | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        trimmed = value.strip().rstrip("/")
+        if not trimmed:
+            raise ValueError("base_url must not be empty")
+        if trimmed.endswith("/chat/completions"):
+            raise ValueError(
+                "Grok base_url must point to the proxy /v1 root; "
+                "the client appends /chat/completions"
+            )
+        return trimmed
+
+    def validate_reasoning(self, *, source_path: Path) -> "GrokConfig":
+        reasoning = self.reasoning
+        if reasoning is None:
+            return self
+        ctx = f"(provider={self.provider}, model={self.model}, path={source_path})"
+        enabled = reasoning.enabled
+        if reasoning.effort is not None and enabled is None:
+            enabled = True
+            reasoning = reasoning.model_copy(update={"enabled": enabled})
+        if enabled is False and reasoning.effort is not None:
+            raise ValueError(
+                "reasoning.effort cannot be set when enabled is false " + ctx
+            )
+        if (
+            reasoning.effort is not None
+            and reasoning.supported_efforts
+            and reasoning.effort not in reasoning.supported_efforts
+        ):
+            allowed = ", ".join(reasoning.supported_efforts) or "(none)"
+            raise ValueError(
+                f"reasoning.effort={reasoning.effort!r} is not supported "
+                f"(supported_efforts={allowed}) {ctx}"
+            )
+        return self.model_copy(update={"reasoning": reasoning})
+
+    def get_vision(self) -> bool:
+        return self.vision
+
+    def supports_response_schema(self) -> bool:
+        return True
+
+    def create_client(self, **kwargs: Any) -> Any:
+        from ..llm.providers.grok import GrokClient
+        return GrokClient(self, **kwargs)
+
+
 class OpenAIReasoningConfig(StrictConfigModel):
     """OpenAI Chat Completions reasoning config.
 
@@ -1047,6 +1126,7 @@ LLMConfig = Annotated[
     | CopilotConfig
     | CodexConfig
     | ClaudeCodeConfig
+    | GrokConfig
     | OpenAIConfig
     | DeepSeekConfig
     | AnthropicConfig

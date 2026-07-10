@@ -20,7 +20,7 @@ from ..agent.shared_state_replay import rebuild_shared_state_from_sessions
 from ..brain_prompt_policy import BrainPromptPolicy
 from ..context import ContextBuilder, Conversation
 from ..core import load_config
-from ..core.schema import CodexConfig, CopilotConfig, OpenAIConfig
+from ..core.schema import CodexConfig, CopilotConfig, GrokConfig, OpenAIConfig
 from ..llm import create_agent_client
 from ..memory import (
     BM25MemorySearch,
@@ -136,6 +136,42 @@ def _make_codex_cache_key_provider(
     return _provider
 
 
+def _make_grok_conv_id_provider(
+    *,
+    session_id_getter: Callable[[], str | None],
+    namespace: str,
+    enabled: bool,
+    ttl: str,
+) -> Callable[[], str | None]:
+    """Build sticky ``x-grok-conv-id`` values for xAI prompt-cache routing.
+
+    xAI auto-caches shared prefixes, but hits are per-server. The official
+    Chat Completions recommendation is to always set ``x-grok-conv-id`` so
+    consecutive turns land on the same host.
+
+    - Always sticky on session + agent namespace when a session exists.
+    - When cache.enabled, also rotate a TTL bucket (same buckets as codex)
+      so ``cache.ttl`` actually changes key lifetime instead of being ignored.
+    """
+
+    def _provider() -> str | None:
+        session_id = session_id_getter()
+        if not session_id:
+            return None
+        if not enabled:
+            return f"{session_id}:{namespace}"
+        bucket = _codex_cache_bucket(ttl)
+        if bucket is None:
+            logging.getLogger(__name__).warning(
+                "grok cache.ttl %r is unsupported; sticky conv id without TTL bucket",
+                ttl,
+            )
+            return f"{session_id}:{namespace}"
+        return f"{session_id}:{namespace}:{bucket}"
+
+    return _provider
+
+
 def _emit_pre_tui_message(console, level: str, message: str) -> None:
     """Mirror startup diagnostics to stderr before Textual takes over."""
     printer = getattr(console, f"print_{level}", None)
@@ -240,6 +276,16 @@ def main(user: str, resume: str | None = None) -> None:
             })
         if isinstance(llm_config, OpenAIConfig) and cache_retention:
             kwargs["prompt_cache_retention"] = cache_retention
+        if isinstance(llm_config, GrokConfig) and cache_namespace is not None:
+            # Always sticky-route for max xAI cache hits; TTL bucket when enabled.
+            kwargs["conv_id_provider"] = _make_grok_conv_id_provider(
+                session_id_getter=(
+                    lambda: session_mgr.current_session_id if session_mgr is not None else None
+                ),
+                namespace=cache_namespace,
+                enabled=cache_enabled,
+                ttl=cache_ttl,
+            )
         if isinstance(llm_config, CodexConfig):
             kwargs["session_id_provider"] = (
                 lambda: session_mgr.current_session_id if session_mgr is not None else None

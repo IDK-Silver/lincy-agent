@@ -4,6 +4,7 @@ from .codex import CodexClient
 from .copilot import CopilotClient
 from .deepseek import DeepSeekClient
 from .gemini import GeminiClient
+from .grok import GrokClient
 from .ollama_native import OllamaNativeClient
 from .openai import OpenAIClient
 from .openai_compat import OpenAICompatibleClient
@@ -16,6 +17,7 @@ __all__ = [
     "CopilotClient",
     "DeepSeekClient",
     "GeminiClient",
+    "GrokClient",
     "OllamaNativeClient",
     "OpenAIClient",
     "OpenAICompatibleClient",

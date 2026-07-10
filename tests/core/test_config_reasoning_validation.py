@@ -288,6 +288,57 @@ def test_copilot_no_reasoning_passes(monkeypatch, tmp_path: Path):
     assert config.reasoning is None
 
 
+def test_grok_validates_supported_efforts(monkeypatch, tmp_path: Path):
+    _write_yaml(
+        tmp_path / "llm" / "x.yaml",
+        {
+            "provider": "grok",
+            "model": "grok-4.5",
+            "reasoning": {"effort": "xhigh", "supported_efforts": ["low", "high"]},
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="is not supported"):
+        config_module.resolve_llm_config("llm/x.yaml")
+
+
+def test_grok_rejects_effort_when_disabled(monkeypatch, tmp_path: Path):
+    _write_yaml(
+        tmp_path / "llm" / "x.yaml",
+        {
+            "provider": "grok",
+            "model": "grok-4.3",
+            "reasoning": {"enabled": False, "effort": "low"},
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="cannot be set when enabled is false"):
+        config_module.resolve_llm_config("llm/x.yaml")
+
+
+def test_grok_passes_with_valid_effort(monkeypatch, tmp_path: Path):
+    _write_yaml(
+        tmp_path / "llm" / "x.yaml",
+        {
+            "provider": "grok",
+            "model": "grok-4.5",
+            "reasoning": {
+                "effort": "high",
+                "supported_efforts": ["low", "medium", "high"],
+            },
+        },
+    )
+    monkeypatch.setattr(config_module, "CFGS_DIR", tmp_path)
+
+    config = config_module.resolve_llm_config("llm/x.yaml")
+    assert config.provider == "grok"
+    assert config.reasoning.effort == "high"
+    assert config.reasoning.enabled is True
+    assert config.base_url == "http://localhost:4144/v1"
+
+
 def test_claude_code_accepts_adaptive_thinking(monkeypatch, tmp_path: Path):
     _write_yaml(
         tmp_path / "llm" / "x.yaml",

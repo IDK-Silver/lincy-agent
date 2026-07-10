@@ -172,6 +172,52 @@
 
 ---
 
+## Grok (SuperGrok OAuth via local proxy)
+
+### 1. 官方 API 事實 / 逆向資訊
+
+> **重要標示**：本專案 `provider: grok` 走 **SuperGrok / X Premium+ 訂閱 OAuth**，不是 `XAI_API_KEY` 計費路徑。OAuth 由 `grok-proxy` 處理；client 只打本地 proxy 的 OpenAI-compatible Chat Completions。
+
+| 項目 | 事實 | 來源類型 | 來源連結 / 備註 | 可信度 |
+|------|------|---------|----------------|--------|
+| 官方 Chat Completions | `POST https://api.x.ai/v1/chat/completions` | 官方文件 | [xAI API](https://docs.x.ai/) | 高 |
+| 官方 Responses API | `POST https://api.x.ai/v1/responses` | 官方文件 | 同上；proxy 亦 pass-through，但本 adapter 不用 | 高 |
+| Auth（API key 路徑） | `Authorization: Bearer $XAI_API_KEY` | 官方文件 | 本專案 OAuth 路徑**不**使用此 key | 高 |
+| Auth（訂閱 OAuth） | device-code against `auth.x.ai`；access token 短命，需 refresh | 社群逆向 + OIDC discovery | Hermes / OpenClaw 共用 public client_id；見 `src/grok_proxy/auth.py` | 中 |
+| OAuth client_id | `b1a00492-073a-47ea-816f-4c329264a828` | 逆向 | xAI 共享 public client；consent 可能顯示 Grok Build | 中 |
+| OAuth scope | `openid profile email offline_access grok-cli:access api:access` | 逆向 | 同上 | 中 |
+| Chat Completions reasoning | 頂層 `reasoning_effort` string（OpenAI SDK / xAI SDK 皆如此） | 官方文件 | [Reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning) | 高 |
+| Responses reasoning（對照） | `reasoning: {"effort": "..."}` nested object | 官方文件 | 與 Chat Completions 格式不同；本 adapter 不用 | 高 |
+| grok-4.5 effort | `low` / `medium` / `high`（預設 high）；**不能完全關閉 reasoning** | 官方文件 | 同上 | 高 |
+| grok-4.3 effort | 社群/相容層常見 `none`/`low`/`medium`/`high` | 社群 + 目錄慣例 | 以 profile `supported_efforts` 為準；上游拒絕則改 profile | 中 |
+| 訂閱 OAuth 常見模型 | `grok-4.5`, `grok-4.3`, `grok-build-0.1` 等 | 社群（OpenClaw/Hermes） | 帳號 entitlement 可能不同 | 中 |
+| Tier gate | OAuth 登入成功但 inference 403 可能是 allowlist | 社群實測 | 可改走 `XAI_API_KEY` / OpenRouter | 中 |
+
+### 2. 本專案 adapter 規則
+
+| 項目 | 規則 | 程式碼位置 |
+|------|------|-----------|
+| 對內 API | `GrokClient` 打本地 proxy `POST {base_url}/chat/completions` | `src/chat_agent/llm/providers/grok.py` |
+| 預設 base_url | `http://localhost:4144/v1` | `src/chat_agent/core/schema.py`（`GrokConfig`） |
+| Auth | client 送 sentinel `Bearer local-proxy`；**真實 token 由 grok-proxy 注入** | `src/chat_agent/llm/providers/grok.py` + `src/grok_proxy/service.py` |
+| 本地登入 | `uv run grok-proxy login`（device-code） | `src/grok_proxy/__main__.py` |
+| `reasoning_effort` | YAML `reasoning.effort` / `enabled=false`→`none` 映射為頂層 `reasoning_effort` | `src/chat_agent/llm/providers/grok.py` |
+| System messages | 連續 leading system 合併成一則（穩定 prefix 利於 automatic cache） | `src/chat_agent/llm/providers/grok.py` |
+| Prompt cache sticky | Chat Completions 送 header `x-grok-conv-id`；值 = `session_id:agent_namespace[:ttl_bucket]`；proxy **原樣轉發**到 xAI | `src/chat_agent/cli/app.py` + `src/chat_agent/llm/providers/grok.py` + `src/grok_proxy/` |
+| `cache.ttl` 語意 | 啟用 cache 時 bucket 與 codex 相同（`ephemeral`=5m / `1h` / `24h`），控制 sticky key 旋轉；關閉 cache 時仍 sticky 在 `session:namespace`（官方建議永遠帶 conv id） | `src/chat_agent/cli/app.py` |
+| Responses pass-through | 若 client 只帶 `x-grok-conv-id` 且 body 無 `prompt_cache_key`，proxy 注入 `prompt_cache_key` | `src/grok_proxy/app.py` |
+| Supervisor | `grok-proxy` `enabled: auto` when any agent uses `provider: grok` | `cfgs/supervisor.yaml` |
+| Profiles | `cfgs/llm/grok/<model>/{thinking,no-thinking,low-thinking}.yaml` | `cfgs/llm/grok/` |
+
+### 3. 逆向/實測資訊
+
+| 項目 | 事實 | 來源類型 | 可信度 | 備註 |
+|------|------|---------|--------|------|
+| OAuth transport 社群偏好 | Hermes/OpenClaw 多用 Responses；本專案第一版 adapter 先走 Chat Completions pass-through | 社群文件 | 中 | 若 OAuth 僅放行 Responses，再加 Responses client |
+| Access token 壽命 | ~6h；proxy refresh skew 1h | 社群實測 | 中 | `src/grok_proxy/auth.py` |
+
+---
+
 ## OpenAI
 
 ### 1. 官方 API 事實
@@ -420,17 +466,17 @@
 
 ## 差異總結表
 
-| 項目 | Copilot | Claude Code | OpenAI | Anthropic | Gemini | OpenRouter | Ollama |
-|------|---------|-------------|--------|-----------|--------|------------|--------|
-| Endpoint | OpenAI compat（歷史/實測） | `/v1/messages`（Anthropic schema） | Chat Completions | `/v1/messages` | `generateContent` | OpenAI compat | native `/api/chat` |
-| Reasoning 參數 | `reasoning_effort`（頂層，逆向/實測） | `thinking.type` + `output_config.effort` | `reasoning_effort`（頂層） | `thinking.type` + `output_config.effort` | `thinkingConfig` | `reasoning: {"effort":...}` | `think`（native） |
-| Effort 值 | low/medium/high/xhigh（curated profiles；backend 逆向） | low/medium/high/max（`output_config.effort`） | low/medium/high/xhigh/max（adapter passthrough；官方另列 none） | low/medium/high/max（output_config） | minimal/low/medium/high（依模型） | none/minimal/low/medium/high/xhigh | low/medium/high/xhigh/max（adapter passthrough） |
-| Token budget | 無 | `thinking.budget_tokens` | 無 | `thinking.budget_tokens` | `thinkingBudget` | `reasoning.max_tokens` | 無 |
-| Vision | `image_url`（實測） | `image` block（base64） | `image_url` | `image` block（base64/url） | `inlineData`（base64） | `image_url` | 依模型 |
-| Tools | OpenAI function（實測） | Anthropic `input_schema` | OpenAI function | Anthropic `input_schema` | Gemini `functionDeclarations` | OpenAI function | native `tools` |
-| Auth | proxy 處理（逆向） | proxy 處理（Claude Code OAuth bearer，逆向） | Bearer token | Bearer/x-api-key + version | API key (header/query) | Bearer token | 本機 daemon 無 |
-| max_tokens | 不需要（實測） | **必填** | 可選（GPT-5+ 用 `max_completion_tokens`） | **必填** | 可選（maxOutputTokens） | 可選 | `options.num_predict` |
-| Prompt cache | 無 | Anthropic breakpoint | 自動 prefix（`prompt_cache_retention: "24h"`） | Anthropic breakpoint | 無 | `cache_control` breakpoint | 無 |
+| 項目 | Copilot | Claude Code | Grok (OAuth proxy) | OpenAI | Anthropic | Gemini | OpenRouter | Ollama |
+|------|---------|-------------|-------------------|--------|-----------|--------|------------|--------|
+| Endpoint | OpenAI compat（歷史/實測） | `/v1/messages`（Anthropic schema） | OpenAI compat via local proxy | Chat Completions | `/v1/messages` | `generateContent` | OpenAI compat | native `/api/chat` |
+| Reasoning 參數 | `reasoning_effort`（頂層，逆向/實測） | `thinking.type` + `output_config.effort` | `reasoning_effort`（頂層） | `reasoning_effort`（頂層） | `thinking.type` + `output_config.effort` | `thinkingConfig` | `reasoning: {"effort":...}` | `think`（native） |
+| Effort 值 | low/medium/high/xhigh（curated profiles；backend 逆向） | low/medium/high/max（`output_config.effort`） | none/low/medium/high/xhigh（model-dependent） | low/medium/high/xhigh/max（adapter passthrough；官方另列 none） | low/medium/high/max（output_config） | minimal/low/medium/high（依模型） | none/minimal/low/medium/high/xhigh | low/medium/high/xhigh/max（adapter passthrough） |
+| Token budget | 無 | `thinking.budget_tokens` | 無 | 無 | `thinking.budget_tokens` | `thinkingBudget` | `reasoning.max_tokens` | 無 |
+| Vision | `image_url`（實測） | `image` block（base64） | `image_url` | `image_url` | `image` block（base64/url） | `inlineData`（base64） | `image_url` | 依模型 |
+| Tools | OpenAI function（實測） | Anthropic `input_schema` | OpenAI function | OpenAI function | Anthropic `input_schema` | Gemini `functionDeclarations` | OpenAI function | native `tools` |
+| Auth | proxy 處理（逆向） | proxy 處理（Claude Code OAuth bearer，逆向） | proxy 處理（SuperGrok OAuth） | Bearer token | Bearer/x-api-key + version | API key (header/query) | Bearer token | 本機 daemon 無 |
+| max_tokens | 不需要（實測） | **必填** | 可選 | 可選（GPT-5+ 用 `max_completion_tokens`） | **必填** | 可選（maxOutputTokens） | 可選 | `options.num_predict` |
+| Prompt cache | 無 | Anthropic breakpoint | 自動 prefix + `x-grok-conv-id` sticky | 自動 prefix（`prompt_cache_retention: "24h"`） | Anthropic breakpoint | 無 | `cache_control` breakpoint | 無 |
 
 ---
 
@@ -440,7 +486,7 @@
 
 | Provider | API 是否可能回 usage | Adapter 是否回收 prompt/completion/total | Adapter 是否回收 cache read/write | 缺值策略 |
 |---|---|---|---|---|
-| OpenAI / OpenRouter / Copilot（OpenAI-compatible） | 是（視 gateway/模型） | 是 | 是（若有 prompt_tokens_details） | `usage=None` 時標記 unavailable |
+| OpenAI / OpenRouter / Copilot / Grok（OpenAI-compatible） | 是（視 gateway/模型） | 是 | 是（若有 prompt_tokens_details） | `usage=None` 時標記 unavailable |
 | Ollama（native `/api/chat`） | 是（`prompt_eval_count` / `eval_count`） | 是 | 否 | 欄位缺失時標記 unavailable |
 | Anthropic | 是 | 是（prompt = input + cache_read + cache_creation；completion = output） | 是（cache_read_input_tokens / cache_creation_input_tokens） | `usage` 缺失時標記 unavailable |
 | Gemini | 是（usageMetadata） | 是（promptTokenCount / candidatesTokenCount / totalTokenCount） | 否 | `usageMetadata` 缺失時標記 unavailable |
