@@ -15,6 +15,8 @@ def test_cache_usage_logs_even_when_console_debug_disabled(caplog) -> None:
     response = LLMResponse(
         content="ok",
         tool_calls=[],
+        prompt_tokens=100,
+        usage_available=True,
         cache_read_tokens=90,
         cache_write_tokens=10,
     )
@@ -23,7 +25,7 @@ def test_cache_usage_logs_even_when_console_debug_disabled(caplog) -> None:
         _debug_print_responder_output(console, response, label="responder")
 
     assert any(
-        record.message == "cache: read=90 write=10 hit=90%"
+        record.getMessage() == "cache: read=90 prompt=100 rate=90% write=10"
         for record in caplog.records
     )
     console.print_debug.assert_not_called()

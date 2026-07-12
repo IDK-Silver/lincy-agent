@@ -130,10 +130,10 @@ def test_repo_agent_config_brain_uses_claude_code_with_expected_fallbacks():
     assert brain_llm.temperature == 1.0
 
     fallbacks = config.agents["brain"].llm_fallbacks
-    assert [cfg.provider for cfg in fallbacks] == ["codex"]
-    assert [cfg.model for cfg in fallbacks] == ["gpt-5.5"]
+    assert [cfg.provider for cfg in fallbacks] == ["openrouter"]
+    assert [cfg.model for cfg in fallbacks] == ["x-ai/grok-4.5"]
     assert fallbacks[0].reasoning.enabled is True
-    assert fallbacks[0].reasoning.effort == "xhigh"
+    assert fallbacks[0].reasoning.effort == "high"
 
 
 def test_repo_agent_config_memory_editor_uses_claude_sonnet_5_no_thinking():
