@@ -40,6 +40,9 @@ class ClaudeCodeProxySettings:
     required_system_prompt: str = DEFAULT_REQUIRED_SYSTEM_PROMPT
     user_agent: str = "chat-agent-claude-code-proxy/0.1.0"
     access_token: str | None = None
+    # Inbound key required from non-loopback clients; loopback never needs it.
+    # Distinct from access_token, which is the upstream Anthropic credential.
+    api_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "ClaudeCodeProxySettings":
@@ -54,6 +57,7 @@ class ClaudeCodeProxySettings:
         )
         user_agent = _env("CLAUDE_CODE_PROXY_USER_AGENT") or "chat-agent-claude-code-proxy/0.1.0"
         access_token = _env("CLAUDE_CODE_PROXY_ACCESS_TOKEN", "CLAUDE_CODE_ACCESS_TOKEN")
+        api_key = _env("CLAUDE_CODE_PROXY_API_KEY")
         return cls(
             host=settings.host,
             port=settings.port,
@@ -66,6 +70,7 @@ class ClaudeCodeProxySettings:
             required_system_prompt=required_system_prompt,
             user_agent=user_agent,
             access_token=access_token,
+            api_key=api_key,
         )
 
     @classmethod

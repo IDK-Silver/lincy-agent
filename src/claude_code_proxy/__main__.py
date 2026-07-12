@@ -43,8 +43,13 @@ Run `claude-code-proxy <command> --help` for command-specific flags.
 SERVE_EPILOG = """\
 examples:
   claude-code-proxy serve
-  claude-code-proxy serve --host 0.0.0.0 --port 4200
+  claude-code-proxy serve --host 0.0.0.0 --api-key secret123   # allow LAN clients
   claude-code-proxy serve --access-token sk-ant-...   # bypass the token store
+
+Localhost requests never need credentials. Non-localhost requests must present
+the inbound API key (x-api-key or Authorization: Bearer); without --api-key /
+CLAUDE_CODE_PROXY_API_KEY they are rejected, so binding a public host never
+silently exposes upstream quota.
 
 Any flag left unset falls back to its CLAUDE_CODE_PROXY_* environment variable,
 then to a built-in default.
@@ -107,6 +112,13 @@ def build_serve_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--access-token",
         help="Bypass the OAuth token store and use this access token directly.",
+    )
+    parser.add_argument(
+        "--api-key",
+        help=(
+            "Inbound API key required from non-localhost clients. "
+            "Localhost requests never need it."
+        ),
     )
     _add_common_oauth_flags(parser)
     return parser
@@ -172,6 +184,8 @@ def _settings_from_serve_args(args: argparse.Namespace) -> ClaudeCodeProxySettin
         settings = replace(settings, user_agent=args.user_agent)
     if args.access_token is not None:
         settings = replace(settings, access_token=args.access_token)
+    if args.api_key is not None:
+        settings = replace(settings, api_key=args.api_key)
     if args.oauth_client_id is not None:
         settings = replace(settings, oauth_client_id=args.oauth_client_id)
     if args.oauth_scope is not None:
