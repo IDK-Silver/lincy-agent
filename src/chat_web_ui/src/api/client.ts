@@ -57,3 +57,45 @@ export async function sendChatMessage(content: string): Promise<{ event: WebChat
   })
   return responseJsonOrError(res)
 }
+
+export interface ClaudeUsageWindow {
+  utilization: number | null
+  resets_at: string | null
+}
+
+export interface ClaudeAccountInfo {
+  email: string | null
+  display_name: string | null
+  plan_type: string | null
+  rate_limit_tier: string | null
+}
+
+export interface ClaudeAccount {
+  id: string
+  source: string
+  priority: number
+  status: 'active' | 'standby' | 'benched' | 'unusable'
+  error: string | null
+  account: ClaudeAccountInfo | null
+  usage: {
+    five_hour: ClaudeUsageWindow | null
+    seven_day: ClaudeUsageWindow | null
+  } | null
+}
+
+export interface ClaudeModel {
+  id: string
+  display_name: string | null
+}
+
+export interface ClaudeAccountsResponse {
+  available: boolean
+  accounts: ClaudeAccount[]
+  models: ClaudeModel[]
+  error: string | null
+}
+
+export async function fetchClaudeAccounts(): Promise<ClaudeAccountsResponse> {
+  const res = await fetch(`${BASE}/api/claude-accounts`)
+  return res.json()
+}
