@@ -166,3 +166,183 @@ def test_health_stays_open_for_remote_clients(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+_PROFILE_PAYLOAD = {
+    "account": {"email": "user@example.com", "display_name": "User"},
+    "organization": {
+        "organization_type": "claude_max",
+        "rate_limit_tier": "default_claude_max_5x",
+    },
+}
+_USAGE_PAYLOAD = {
+    "five_hour": {"utilization": 3.0, "resets_at": "2026-07-12T20:29:59+00:00"},
+    "seven_day": {"utilization": 1.0, "resets_at": "2026-07-18T23:59:59+00:00"},
+}
+_MODELS_PAYLOAD = {
+    "data": [
+        {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+        {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+    ]
+}
+
+
+class _UsageResponse:
+    def __init__(self, payload: dict, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+        self.content = self.text.encode("utf-8")
+        self.headers = {"content-type": "application/json"}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _UsageAsyncClient:
+    """Mock upstream httpx client answering the OAuth account endpoints."""
+
+    def __init__(self, calls: list[str]):
+        self._calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url: str, headers: dict | None = None):
+        self._calls.append(url)
+        if "oauth/profile" in url:
+            return _UsageResponse(_PROFILE_PAYLOAD)
+        if "oauth/usage" in url:
+            return _UsageResponse(_USAGE_PAYLOAD)
+        if "/v1/models" in url:
+            return _UsageResponse(_MODELS_PAYLOAD)
+        raise AssertionError(f"unexpected GET {url}")
+
+
+def _usage_client(
+    monkeypatch,
+    *,
+    api_key: str | None,
+    peer: tuple[str, int] | None,
+) -> tuple[TestClient, list[str]]:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _UsageAsyncClient(calls),
+    )
+    settings = ClaudeCodeProxySettings(access_token="tok-upstream", api_key=api_key)
+    app = create_app(settings)
+    if peer is None:
+        return TestClient(app), calls
+    return TestClient(app, client=peer), calls
+
+
+def test_usage_reports_account_usage_and_models(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    response = client.get("/usage")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["accounts"]) == 1
+    account = payload["accounts"][0]
+    assert account["status"] == "active"
+    assert account["account"]["email"] == "user@example.com"
+    assert account["account"]["rate_limit_tier"] == "default_claude_max_5x"
+    assert account["usage"]["five_hour"]["utilization"] == 3.0
+    assert account["usage"]["seven_day"]["utilization"] == 1.0
+    assert [m["id"] for m in payload["models"]] == ["claude-opus-4-8", "claude-sonnet-5"]
+
+
+def test_usage_snapshot_is_cached_between_requests(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    first = client.get("/usage").json()
+    upstream_calls = len(calls)
+    second = client.get("/usage").json()
+
+    assert first == second
+    assert len(calls) == upstream_calls  # served from cache, no new upstream calls
+
+
+def test_usage_requires_key_for_remote_clients(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key="secret", peer=_REMOTE)
+
+    response = client.get("/usage")
+
+    assert response.status_code == 401
+    assert calls == []
+
+
+def test_usage_allows_remote_clients_with_key(monkeypatch):
+    client, _ = _usage_client(monkeypatch, api_key="secret", peer=_REMOTE)
+
+    response = client.get("/usage", headers={"x-api-key": "secret"})
+
+    assert response.status_code == 200
+    assert response.json()["accounts"][0]["status"] == "active"
+
+
+def test_models_passthrough_returns_upstream_payload(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    response = client.get("/v1/models?limit=5")
+
+    assert response.status_code == 200
+    assert response.json() == _MODELS_PAYLOAD
+    assert any(url.endswith("/v1/models?limit=5") for url in calls)
+
+
+def test_models_requires_key_for_remote_clients(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key="secret", peer=_REMOTE)
+
+    response = client.get("/v1/models")
+
+    assert response.status_code == 401
+    assert calls == []
+
+
+def test_usage_reports_store_tokens_in_priority_order(monkeypatch, tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    from claude_code_proxy.auth import StoredClaudeCodeToken, StoredClaudeCodeTokenStore
+
+    path = tmp_path / "tokens.json"
+    monkeypatch.setattr("claude_code_proxy.auth.default_token_path", lambda: path)
+
+    def _token(token_id: str, created: datetime) -> StoredClaudeCodeToken:
+        return StoredClaudeCodeToken(
+            id=token_id,
+            access_token=f"tok-{token_id}",
+            refresh_token=None,
+            expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+            source="oauth_browser",
+            client_id="client-id",
+            created_at=created,
+        )
+
+    StoredClaudeCodeTokenStore(path).replace_all(
+        [
+            _token("newer", datetime(2026, 6, 1, tzinfo=UTC)),
+            _token("older", datetime(2026, 1, 1, tzinfo=UTC)),
+        ]
+    )
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _UsageAsyncClient(calls),
+    )
+    app = create_app(ClaudeCodeProxySettings())
+    client = TestClient(app, client=_LOOPBACK)
+
+    payload = client.get("/usage").json()
+
+    assert [(a["id"], a["status"]) for a in payload["accounts"]] == [
+        ("newer", "active"),
+        ("older", "standby"),
+    ]
+    assert all(a["account"]["email"] == "user@example.com" for a in payload["accounts"])

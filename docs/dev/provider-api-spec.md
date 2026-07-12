@@ -70,6 +70,10 @@
 | Required system prompt | 第一個 system text block 需為 `You are Claude Code, Anthropic's official CLI for Claude.` | 逆向 / 實測 | 中 | 社群 proxy 與實測都依賴此行為 |
 | Beta headers | `claude-code-*`, `oauth-*`, `interleaved-thinking-*`, `fine-grained-tool-streaming-*` 等 beta header | 逆向 / 實測 | 低 | 非穩定契約，可能隨上游變動 |
 | OAuth refresh endpoint | `POST https://console.anthropic.com/v1/oauth/token` | 逆向 / 實測 | 中 | 用 refresh token 換新 access token |
+| OAuth usage endpoint | `GET https://api.anthropic.com/api/oauth/usage` with Bearer + `anthropic-beta: oauth-2025-04-20`；回 `five_hour` / `seven_day` 的 `utilization`（百分比）與 `resets_at`，另有 `limits[]`（session / weekly_all / weekly_scoped）與 overage 資訊 | 逆向 / 實測 | 中 | Claude Code CLI `/usage` 顯示來源；2026-07 實測 |
+| OAuth profile endpoint | `GET https://api.anthropic.com/api/oauth/profile`；回 `account`（email、display_name）與 `organization`（organization_type、rate_limit_tier） | 逆向 / 實測 | 中 | 2026-07 實測 |
+| Rate limit headers | `/v1/messages` 回應帶 `anthropic-ratelimit-unified-5h-*` / `-7d-*`（utilization、reset epoch、status）| 逆向 / 實測 | 中 | proxy 目前不轉發上游 headers |
+| Models endpoint | `GET /v1/models` 用 OAuth Bearer + `anthropic-version` 可查帳號可用模型（官方 API 形狀） | Anthropic 官方文件 + 實測 | 高 | OAuth token 可用性為實測 |
 | Sonnet 5 thinking 預設 | Claude Sonnet 5（`claude-sonnet-5`）adaptive thinking 預設開啟，省略 `thinking` 等同 `{"type": "adaptive"}`；手動 `{"type": "enabled", "budget_tokens": N}` 回 400；需顯式送 `{"type": "disabled"}` 才能關閉。與 Opus 4.7/4.8（預設關閉、需顯式送 `adaptive` 才開啟）相反 | Anthropic 官方文件 | 高 | 2026-07 查證，[Adaptive Thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking) |
 | Sonnet 5 effort 支援值 | 官方支援 `low/medium/high(預設)/xhigh/max` | Anthropic 官方文件 | 高 | [Effort](https://platform.claude.com/docs/en/build-with-claude/effort)；本專案 schema 現況見下方 adapter 規則 |
 
@@ -86,6 +90,8 @@
 | Token 來源 | 先讀 env / `--access-token`（bypass store、不 failover），否則讀多顆 token store 依優先級選一顆，過期則用 refresh token 換新並寫回 store。已移除 Claude Code credentials / Keychain 匯入 | `src/claude_code_proxy/service.py` + `src/claude_code_proxy/auth.py` |
 | 舊檔遷移 | 首次讀取時若偵測到舊版單顆 `token.json`，自動併入 `tokens.json` 並刪舊檔 | `src/claude_code_proxy/auth.py` |
 | 進站認證 | proxy 預設綁 `127.0.0.1:4142`。`/v1/messages` 對 loopback 來源（`127.0.0.0/8`、`::1`、IPv4-mapped）一律免驗；非 loopback 來源必須帶進站 API key（`x-api-key` 或 `Authorization: Bearer`），比對 `--api-key` / `CLAUDE_CODE_PROXY_API_KEY`。未設定 key 時非 loopback 一律 `401`（fail closed），因此綁 `0.0.0.0` 不會裸奔。只信 socket peer address，不吃 `X-Forwarded-For`；`/health` 不設限；CORS middleware 已移除（避免瀏覽器網頁沾 localhost 免驗待遇）。注意與 `--access-token`（上游 Anthropic 憑證）是兩回事。由 supervisor 啟動時，repo 根目錄 `.env` 會自動注入（設定範例見 `.env.example`） | `src/claude_code_proxy/app.py` + `src/claude_code_proxy/settings.py` |
+| Usage snapshot | `GET /usage`（過進站閘門）回 token pool 每顆的帳號身分（email / plan / rate_limit_tier）、5h 與 7d utilization / resets_at、狀態（active / standby / benched / unusable，active 為 acquire 會選中的第一顆），加 active 帳號的 `models[]`。快取 30s（`USAGE_CACHE_TTL_SECONDS`）避免 dashboard polling 打爆上游；過期 token 會先 refresh，單一帳號失敗不影響整體 snapshot | `src/claude_code_proxy/service.py`（`usage_snapshot`）+ `src/claude_code_proxy/app.py` |
+| Models passthrough | `GET /v1/models`（過進站閘門）以官方 API 形狀原樣轉發，query 參數透傳，與 `/v1/messages` 相同的 401/403/429 token failover；web dashboard 的 model list 亦重用此路徑 | `src/claude_code_proxy/service.py`（`forward_models`）+ `src/claude_code_proxy/app.py` |
 | Thinking payload | YAML 直接用 Claude Code `thinking` 物件：`type=adaptive|enabled|disabled`；`enabled` 時可選 `budget_tokens` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
 | Effort payload | YAML 直接用 `output_config.effort`；client passthrough 成 upstream `output_config` | `src/chat_agent/core/schema.py` + `src/chat_agent/llm/providers/claude_code.py` |
 | Effort 值集合限制 | `ClaudeCodeOutputConfig.effort` 目前只允許 `low/medium/high/max`；官方已對 Sonnet 5、Opus 4.7、Opus 4.8 開放 `xhigh`，本專案尚未擴充 schema | `src/chat_agent/core/schema.py`（`ClaudeCodeOutputConfig`） |

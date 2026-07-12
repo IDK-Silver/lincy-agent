@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import json
 from typing import Any
 
 import anyio
 import httpx
+from pydantic import BaseModel, ConfigDict
 
 from chat_agent.llm.schema import ClaudeCodeRequest
 
@@ -20,6 +23,16 @@ from .auth import (
 from .settings import ClaudeCodeProxySettings
 
 EFFORT_BETA_HEADER = "effort-2025-11-24"
+
+# Reverse-engineered OAuth account endpoints used by the Claude Code CLI for its
+# /usage display. Documented in docs/dev/provider-api-spec.md.
+OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+OAUTH_BETA_HEADER = "oauth-2025-04-20"
+
+# Usage snapshots hit two upstream endpoints per stored token; cache briefly so
+# a polling dashboard cannot hammer Anthropic.
+USAGE_CACHE_TTL_SECONDS = 30.0
 
 # Upstream status codes that should trigger failover to the next token rather than
 # surfacing the error to the client. Claude Code quota exhaustion may surface as
@@ -57,6 +70,48 @@ def _now() -> float:
     return datetime.now(tz=UTC).timestamp()
 
 
+class _TolerantModel(BaseModel):
+    """Parse reverse-engineered payloads without breaking on unknown fields."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class OAuthUsageWindow(_TolerantModel):
+    utilization: float | None = None
+    resets_at: str | None = None
+
+
+class OAuthUsagePayload(_TolerantModel):
+    five_hour: OAuthUsageWindow | None = None
+    seven_day: OAuthUsageWindow | None = None
+
+
+class _OAuthProfileAccount(_TolerantModel):
+    email: str | None = None
+    display_name: str | None = None
+
+
+class _OAuthProfileOrganization(_TolerantModel):
+    organization_type: str | None = None
+    rate_limit_tier: str | None = None
+
+
+class OAuthProfilePayload(_TolerantModel):
+    account: _OAuthProfileAccount | None = None
+    organization: _OAuthProfileOrganization | None = None
+
+
+@dataclass(frozen=True)
+class PoolEntry:
+    """One credential in the failover pool, resolved for usage reporting."""
+
+    token_id: str
+    source: str
+    access_token: str | None
+    benched: bool
+    error: str | None
+
+
 class ClaudeCodeTokenManager:
     """Load, cache, and refresh Claude Code OAuth tokens (multi-token failover)."""
 
@@ -86,6 +141,61 @@ class ClaudeCodeTokenManager:
         if token_id == ENV_ACCESS_TOKEN_ID:
             return
         self._failed_until[token_id] = _now() + FAILURE_COOLDOWN_SECONDS
+
+    async def pool_entries(self) -> list[PoolEntry]:
+        """Snapshot every credential in priority order for usage reporting.
+
+        Unlike acquire(), benched tokens are included (their utilization is
+        usually the reason they are benched) and stale tokens are refreshed so
+        the account endpoints can still be queried.
+        """
+
+        if self._settings.access_token:
+            return [
+                PoolEntry(
+                    token_id=ENV_ACCESS_TOKEN_ID,
+                    source="env_override",
+                    access_token=normalize_bearer_token(self._settings.access_token),
+                    benched=False,
+                    error=None,
+                )
+            ]
+
+        entries: list[PoolEntry] = []
+        async with self._lock:
+            for token in self._store.load_all() or []:
+                benched = self._is_benched(token.id)
+                if is_token_fresh(token):
+                    entries.append(
+                        PoolEntry(token.id, token.source, token.access_token, benched, None)
+                    )
+                    continue
+                if token.refresh_token:
+                    try:
+                        refreshed = await self._refresh(token)
+                        self._store.save(refreshed)
+                        entries.append(
+                            PoolEntry(
+                                token.id, token.source, refreshed.access_token, benched, None
+                            )
+                        )
+                    except Exception as exc:
+                        entries.append(
+                            PoolEntry(
+                                token.id, token.source, None, benched, f"refresh failed: {exc}"
+                            )
+                        )
+                    continue
+                entries.append(
+                    PoolEntry(
+                        token.id,
+                        token.source,
+                        None,
+                        benched,
+                        "token expired and has no refresh token",
+                    )
+                )
+        return entries
 
     def _is_benched(self, token_id: str) -> bool:
         return self._failed_until.get(token_id, 0.0) > _now()
@@ -165,6 +275,117 @@ class ClaudeCodeProxyService:
     def __init__(self, settings: ClaudeCodeProxySettings):
         self._settings = settings
         self._tokens = ClaudeCodeTokenManager(settings)
+        self._usage_cache: tuple[float, dict[str, Any]] | None = None
+        self._usage_lock = anyio.Lock()
+
+    async def usage_snapshot(self) -> dict[str, Any]:
+        """Report account identity, 5h/7d utilization, and models per pool token.
+
+        One failing account must not break the snapshot: fetch errors are
+        reported per entry. The whole snapshot is cached briefly (the lock also
+        collapses concurrent dashboard refreshes into one upstream sweep).
+        """
+
+        async with self._usage_lock:
+            if self._usage_cache is not None:
+                fetched_at, cached = self._usage_cache
+                if _now() - fetched_at < USAGE_CACHE_TTL_SECONDS:
+                    return cached
+
+            entries = await self._tokens.pool_entries()
+            accounts: list[dict[str, Any]] = []
+            models: list[dict[str, Any]] = []
+            active_token: str | None = None
+            async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
+                for priority, entry in enumerate(entries):
+                    item: dict[str, Any] = {
+                        "id": entry.token_id,
+                        "source": entry.source,
+                        "priority": priority,
+                        "status": "unusable",
+                        "error": entry.error,
+                        "account": None,
+                        "usage": None,
+                    }
+                    if entry.access_token is not None:
+                        if entry.benched:
+                            item["status"] = "benched"
+                        elif active_token is None:
+                            item["status"] = "active"
+                            active_token = entry.access_token
+                        else:
+                            item["status"] = "standby"
+                        try:
+                            account, usage = await self._fetch_account_usage(
+                                client, entry.access_token
+                            )
+                            item["account"] = account
+                            item["usage"] = usage
+                        except Exception as exc:
+                            item["error"] = f"usage fetch failed: {exc}"
+                    accounts.append(item)
+
+            if active_token is not None:
+                models = await self._models_for_snapshot()
+
+            payload = {"accounts": accounts, "models": models}
+            self._usage_cache = (_now(), payload)
+            return payload
+
+    async def _models_for_snapshot(self) -> list[dict[str, Any]]:
+        """Best-effort model list via the standard passthrough; failures yield []."""
+
+        try:
+            body, _ = await self.forward_models("limit=100")
+            payload = json.loads(body)
+        except Exception:
+            # Model list is decoration; account usage stays useful without it.
+            return []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            return []
+        return [
+            {"id": model.get("id"), "display_name": model.get("display_name")}
+            for model in data
+            if isinstance(model, dict) and model.get("id")
+        ]
+
+    def _oauth_headers(self, token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": OAUTH_BETA_HEADER,
+            "User-Agent": self._settings.user_agent,
+        }
+
+    async def _fetch_account_usage(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        headers = self._oauth_headers(token)
+        profile_resp = await client.get(OAUTH_PROFILE_URL, headers=headers)
+        usage_resp = await client.get(OAUTH_USAGE_URL, headers=headers)
+        for response in (profile_resp, usage_resp):
+            if response.status_code >= 400:
+                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        profile = OAuthProfilePayload.model_validate(profile_resp.json())
+        usage = OAuthUsagePayload.model_validate(usage_resp.json())
+        account = {
+            "email": profile.account.email if profile.account else None,
+            "display_name": profile.account.display_name if profile.account else None,
+            "plan_type": (
+                profile.organization.organization_type if profile.organization else None
+            ),
+            "rate_limit_tier": (
+                profile.organization.rate_limit_tier if profile.organization else None
+            ),
+        }
+        usage_out = {
+            "five_hour": usage.five_hour.model_dump() if usage.five_hour else None,
+            "seven_day": usage.seven_day.model_dump() if usage.seven_day else None,
+        }
+        return account, usage_out
+
 
     async def forward_json(self, request: ClaudeCodeRequest) -> tuple[bytes, str]:
         payload = self._build_upstream_request(request)
@@ -198,6 +419,41 @@ class ClaudeCodeProxyService:
                 raise exc
             if response.status_code < 400:
                 return response.content, response.headers.get("content-type", "application/json")
+            error = ClaudeCodeUpstreamError(
+                status_code=response.status_code,
+                body=response.content,
+                media_type=response.headers.get("content-type", "application/json"),
+            )
+            if self._should_failover(token_id, response.status_code):
+                self._tokens.mark_failed(token_id)
+                last_upstream = error
+                continue
+            raise error
+
+    async def forward_models(self, query: str = "") -> tuple[bytes, str]:
+        """Forward GET /v1/models upstream with the same token failover as messages."""
+
+        url = f"{self._settings.anthropic_base_url}/v1/models"
+        if query:
+            url = f"{url}?{query}"
+        last_upstream: ClaudeCodeUpstreamError | None = None
+        while True:
+            try:
+                token, token_id = await self._tokens.acquire()
+            except ClaudeCodeTokenUnavailableError:
+                if last_upstream is not None:
+                    raise last_upstream from None
+                raise
+            headers = {
+                **self._oauth_headers(token),
+                "anthropic-version": self._settings.anthropic_version,
+            }
+            async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
+                response = await client.get(url, headers=headers)
+            if response.status_code < 400:
+                return response.content, response.headers.get(
+                    "content-type", "application/json"
+                )
             error = ClaudeCodeUpstreamError(
                 status_code=response.status_code,
                 body=response.content,

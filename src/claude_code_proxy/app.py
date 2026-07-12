@@ -90,6 +90,30 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/usage")
+    async def usage(raw_request: Request):
+        rejection = _reject_unauthorized(raw_request, settings.api_key)
+        if rejection is not None:
+            return rejection
+        return await service.usage_snapshot()
+
+    @app.get("/v1/models")
+    async def models(raw_request: Request):
+        rejection = _reject_unauthorized(raw_request, settings.api_key)
+        if rejection is not None:
+            return rejection
+        try:
+            body, media_type = await service.forward_models(raw_request.url.query)
+        except ClaudeCodeUpstreamError as exc:
+            return Response(
+                content=exc.body,
+                status_code=exc.status_code,
+                media_type=exc.media_type,
+            )
+        except ClaudeCodeTokenUnavailableError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+        return Response(content=body, media_type=media_type)
+
     @app.post("/v1/messages")
     async def messages(request: ClaudeCodeRequest, raw_request: Request):
         rejection = _reject_unauthorized(raw_request, settings.api_key)
