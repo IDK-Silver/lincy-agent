@@ -81,6 +81,7 @@ export interface ClaudeAccount {
     five_hour: ClaudeUsageWindow | null
     seven_day: ClaudeUsageWindow | null
   } | null
+  stale?: boolean
 }
 
 export interface ClaudeModel {

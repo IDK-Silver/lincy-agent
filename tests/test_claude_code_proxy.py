@@ -178,6 +178,48 @@ class _AsyncClientWithHeaders(_AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_usage_snapshot_serves_stale_data_when_fetch_fails(monkeypatch):
+    monkeypatch.setattr("claude_code_proxy.service.USAGE_CACHE_TTL_SECONDS", 0.0)
+    state = {"fail": False}
+
+    class _OAuthClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str, headers: dict | None = None):
+            if state["fail"]:
+                return _AsyncResponse({"error": {"type": "rate_limit_error"}}, status_code=429)
+            if "oauth/profile" in url:
+                return _AsyncResponse(
+                    {"account": {"email": "user@example.com", "display_name": "U"}}
+                )
+            if "oauth/usage" in url:
+                return _AsyncResponse({"five_hour": {"utilization": 3.0}})
+            return _AsyncResponse({"data": []})
+
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _OAuthClient(),
+    )
+    service = ClaudeCodeProxyService(ClaudeCodeProxySettings(access_token="tok"))
+
+    first = await service.usage_snapshot()
+    assert first["accounts"][0]["stale"] is False
+    assert first["accounts"][0]["usage"]["five_hour"]["utilization"] == 3.0
+
+    state["fail"] = True
+    second = await service.usage_snapshot()
+    account = second["accounts"][0]
+    assert account["stale"] is True
+    assert account["usage"]["five_hour"]["utilization"] == 3.0
+    assert account["account"]["email"] == "user@example.com"
+    assert "429" in account["error"]
+
+
+@pytest.mark.asyncio
 async def test_proxy_service_skips_effort_beta_for_non_effort_model(monkeypatch):
     effects = [(200, {"content": [{"type": "text", "text": "ok"}]})]
     calls: list[dict] = []

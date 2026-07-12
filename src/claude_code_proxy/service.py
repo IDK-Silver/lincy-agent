@@ -30,9 +30,9 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 
-# Usage snapshots hit two upstream endpoints per stored token; cache briefly so
-# a polling dashboard cannot hammer Anthropic.
-USAGE_CACHE_TTL_SECONDS = 30.0
+# Usage snapshots hit two upstream endpoints per stored token; cache aligned
+# with the dashboard's 60s polling so each viewer triggers at most one sweep.
+USAGE_CACHE_TTL_SECONDS = 60.0
 
 # Upstream status codes that should trigger failover to the next token rather than
 # surfacing the error to the client. Claude Code quota exhaustion may surface as
@@ -277,6 +277,9 @@ class ClaudeCodeProxyService:
         self._tokens = ClaudeCodeTokenManager(settings)
         self._usage_cache: tuple[float, dict[str, Any]] | None = None
         self._usage_lock = anyio.Lock()
+        # token id -> last successful (account, usage), served with stale=True
+        # when a later fetch fails (the OAuth endpoints rate-limit under load).
+        self._last_good_usage: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 
     async def usage_snapshot(self) -> dict[str, Any]:
         """Report account identity, 5h/7d utilization, and models per pool token.
@@ -306,6 +309,7 @@ class ClaudeCodeProxyService:
                         "error": entry.error,
                         "account": None,
                         "usage": None,
+                        "stale": False,
                     }
                     if entry.access_token is not None:
                         if entry.benched:
@@ -321,8 +325,13 @@ class ClaudeCodeProxyService:
                             )
                             item["account"] = account
                             item["usage"] = usage
+                            self._last_good_usage[entry.token_id] = (account, usage)
                         except Exception as exc:
                             item["error"] = f"usage fetch failed: {exc}"
+                            last_good = self._last_good_usage.get(entry.token_id)
+                            if last_good is not None:
+                                item["account"], item["usage"] = last_good
+                                item["stale"] = True
                     accounts.append(item)
 
             if active_token is not None:
@@ -480,34 +489,34 @@ class ClaudeCodeProxyService:
     ) -> tuple[httpx.AsyncClient, httpx.Response]:
         payload = self._build_upstream_request(request)
         last_upstream: ClaudeCodeUpstreamError | None = None
-        last_timeout: ClaudeCodeUpstreamTimeoutError | None = None
         while True:
             try:
                 token, token_id = await self._tokens.acquire()
             except ClaudeCodeTokenUnavailableError:
                 if last_upstream is not None:
                     raise last_upstream from None
-                if last_timeout is not None:
-                    raise last_timeout from None
                 raise
             client = httpx.AsyncClient(timeout=self._settings.request_timeout)
             try:
                 upstream_request = client.build_request(
                     "POST",
                     f"{self._settings.anthropic_base_url}/v1/messages",
-                    headers=self._headers(token, request, client_betas),
+                    headers={
+                        **self._headers(token, request, client_betas),
+                        # aiter_raw() relays bytes without decoding, so a
+                        # compressed upstream stream would reach the client as
+                        # unlabeled gzip garbage. SSE gains nothing from
+                        # compression; force identity for a clean passthrough.
+                        "Accept-Encoding": "identity",
+                    },
                     json=payload,
+                    # Huge prompts keep the SSE stream silent for minutes during
+                    # prompt processing; a read timeout here kills legitimate
+                    # long-running streams (surfacing as Cloudflare 524 behind
+                    # the tunnel). Connect/write/pool stay bounded.
+                    timeout=httpx.Timeout(self._settings.request_timeout, read=None),
                 )
                 response = await client.send(upstream_request, stream=True)
-            except httpx.ReadTimeout as exc:
-                await client.aclose()
-                if self._should_failover_timeout(token_id):
-                    self._tokens.mark_failed(token_id)
-                    last_timeout = ClaudeCodeUpstreamTimeoutError(
-                        f"Claude Code upstream timed out for token {token_id}"
-                    )
-                    continue
-                raise exc
             except Exception:
                 await client.aclose()
                 raise

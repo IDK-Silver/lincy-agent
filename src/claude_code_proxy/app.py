@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import secrets
+from typing import AsyncIterator
 
 from starlette.background import BackgroundTask
 from fastapi import FastAPI, Request
@@ -24,6 +26,41 @@ from .settings import ClaudeCodeProxySettings
 async def _close_stream(client, response) -> None:
     await response.aclose()
     await client.aclose()
+
+
+KEEPALIVE_INTERVAL_SECONDS = 30.0
+
+
+async def _stream_with_keepalive(
+    upstream,
+    interval: float = KEEPALIVE_INTERVAL_SECONDS,
+) -> AsyncIterator[bytes]:
+    """Relay upstream bytes, emitting SSE comments until the first byte arrives.
+
+    Anthropic keeps the stream silent while it processes very large prompts;
+    idle-sensitive middleboxes (Cloudflare tunnel cuts origins after ~100-120s
+    without data) kill the connection in that window. SSE comment lines are
+    ignored by event parsers and are only injected before the first real byte,
+    so events are never split.
+    """
+
+    iterator = upstream.aiter_raw().__aiter__()
+    first = asyncio.ensure_future(iterator.__anext__())
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(asyncio.shield(first), timeout=interval)
+                break
+            except TimeoutError:
+                yield b": keepalive\n\n"
+            except StopAsyncIteration:
+                return
+    finally:
+        if not first.done():
+            first.cancel()
+    yield chunk
+    async for chunk in iterator:
+        yield chunk
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -124,7 +161,7 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
             if request.stream:
                 client, upstream = await service.open_stream(request, client_betas)
                 return StreamingResponse(
-                    upstream.aiter_raw(),
+                    _stream_with_keepalive(upstream),
                     status_code=upstream.status_code,
                     media_type=upstream.headers.get("content-type", "text/event-stream"),
                     headers=ClaudeCodeProxyService.passthrough_headers(upstream.headers),

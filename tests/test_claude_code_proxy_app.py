@@ -6,11 +6,13 @@ configured inbound API key and are rejected outright when no key is set.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
+import pytest
 from starlette.testclient import TestClient
 
-from claude_code_proxy.app import create_app
+from claude_code_proxy.app import _stream_with_keepalive, create_app
 from claude_code_proxy.settings import ClaudeCodeProxySettings
 
 _BODY = {
@@ -160,6 +162,48 @@ def test_unparseable_peer_treated_as_remote(monkeypatch):
 
     assert response.status_code == 401
     assert calls == []
+
+
+class _FakeUpstream:
+    """Upstream whose first byte arrives after a configurable delay."""
+
+    def __init__(self, delay: float, chunks: list[bytes]):
+        self._delay = delay
+        self._chunks = chunks
+
+    async def aiter_raw(self):
+        await asyncio.sleep(self._delay)
+        for chunk in self._chunks:
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_stream_keepalive_pings_until_first_byte():
+    upstream = _FakeUpstream(0.12, [b"event: message_start\n\n", b"data: {}\n\n"])
+
+    chunks = [c async for c in _stream_with_keepalive(upstream, interval=0.05)]
+
+    assert chunks[0] == b": keepalive\n\n"
+    # Real bytes follow the pings, in order and unmodified.
+    assert chunks[-2:] == [b"event: message_start\n\n", b"data: {}\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_stream_keepalive_is_silent_for_fast_upstreams():
+    upstream = _FakeUpstream(0.0, [b"event: message_start\n\n"])
+
+    chunks = [c async for c in _stream_with_keepalive(upstream, interval=0.5)]
+
+    assert chunks == [b"event: message_start\n\n"]
+
+
+@pytest.mark.asyncio
+async def test_stream_keepalive_handles_empty_upstream():
+    upstream = _FakeUpstream(0.0, [])
+
+    chunks = [c async for c in _stream_with_keepalive(upstream, interval=0.5)]
+
+    assert chunks == []
 
 
 def test_client_beta_header_is_merged_into_upstream_request(monkeypatch):

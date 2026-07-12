@@ -108,9 +108,7 @@ function planLabel(tier: string | null | undefined, planType: string | null | un
           </span>
         </div>
 
-        <div v-if="acct.error" class="text-xs text-[#EF4444]">{{ acct.error }}</div>
-
-        <div v-else-if="acct.usage" class="grid grid-cols-2 gap-4">
+        <div v-if="acct.usage" class="grid grid-cols-2 gap-4">
           <div v-for="win in [
             { label: '5h', data: acct.usage.five_hour, withDate: false },
             { label: 'Week', data: acct.usage.seven_day, withDate: true },
@@ -134,6 +132,14 @@ function planLabel(tier: string | null | undefined, planType: string | null | un
               {{ formatReset(win.data?.resets_at, win.withDate) }}
             </div>
           </div>
+        </div>
+
+        <div
+          v-if="acct.error"
+          class="text-xs"
+          :class="acct.usage ? 'text-[#6B7280]' : 'text-[#EF4444]'"
+        >
+          {{ acct.stale ? 'stale — ' : '' }}{{ acct.error }}
         </div>
       </div>
 
