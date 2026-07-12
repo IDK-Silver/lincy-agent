@@ -387,7 +387,11 @@ class ClaudeCodeProxyService:
         return account, usage_out
 
 
-    async def forward_json(self, request: ClaudeCodeRequest) -> tuple[bytes, str]:
+    async def forward_json(
+        self,
+        request: ClaudeCodeRequest,
+        client_betas: str | None = None,
+    ) -> tuple[bytes, str, dict[str, str]]:
         payload = self._build_upstream_request(request)
         last_upstream: ClaudeCodeUpstreamError | None = None
         last_timeout: ClaudeCodeUpstreamTimeoutError | None = None
@@ -406,7 +410,7 @@ class ClaudeCodeProxyService:
                 async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
                     response = await client.post(
                         f"{self._settings.anthropic_base_url}/v1/messages",
-                        headers=self._headers(token, request),
+                        headers=self._headers(token, request, client_betas),
                         json=payload,
                     )
             except httpx.ReadTimeout as exc:
@@ -418,7 +422,11 @@ class ClaudeCodeProxyService:
                     continue
                 raise exc
             if response.status_code < 400:
-                return response.content, response.headers.get("content-type", "application/json")
+                return (
+                    response.content,
+                    response.headers.get("content-type", "application/json"),
+                    self.passthrough_headers(response.headers),
+                )
             error = ClaudeCodeUpstreamError(
                 status_code=response.status_code,
                 body=response.content,
@@ -468,6 +476,7 @@ class ClaudeCodeProxyService:
     async def open_stream(
         self,
         request: ClaudeCodeRequest,
+        client_betas: str | None = None,
     ) -> tuple[httpx.AsyncClient, httpx.Response]:
         payload = self._build_upstream_request(request)
         last_upstream: ClaudeCodeUpstreamError | None = None
@@ -486,7 +495,7 @@ class ClaudeCodeProxyService:
                 upstream_request = client.build_request(
                     "POST",
                     f"{self._settings.anthropic_base_url}/v1/messages",
-                    headers=self._headers(token, request),
+                    headers=self._headers(token, request, client_betas),
                     json=payload,
                 )
                 response = await client.send(upstream_request, stream=True)
@@ -534,24 +543,56 @@ class ClaudeCodeProxyService:
     def _should_failover_timeout(token_id: str) -> bool:
         return token_id != ENV_ACCESS_TOKEN_ID
 
-    def _headers(self, token: str, request: ClaudeCodeRequest) -> dict[str, str]:
+    @staticmethod
+    def passthrough_headers(headers: Any) -> dict[str, str]:
+        """Select upstream response headers clients may rely on.
+
+        Claude Code reads the unified rate-limit headers off successful
+        responses to surface 5h/weekly usage warnings; forward them so clients
+        behind the proxy keep that visibility.
+        """
+
+        return {
+            key: value
+            for key, value in headers.items()
+            if key.lower().startswith("anthropic-ratelimit-")
+        }
+
+    def _headers(
+        self,
+        token: str,
+        request: ClaudeCodeRequest,
+        client_betas: str | None = None,
+    ) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {token}",
             "anthropic-version": self._settings.anthropic_version,
             "Content-Type": "application/json",
             "User-Agent": self._settings.user_agent,
         }
-        beta_headers = self._beta_headers(request)
+        beta_headers = self._beta_headers(request, client_betas)
         if beta_headers:
             headers["anthropic-beta"] = beta_headers
         return headers
 
-    def _beta_headers(self, request: ClaudeCodeRequest) -> str:
+    def _beta_headers(
+        self,
+        request: ClaudeCodeRequest,
+        client_betas: str | None = None,
+    ) -> str:
         betas = [
             entry.strip()
             for entry in self._settings.beta_headers.split(",")
             if entry.strip()
         ]
+        # Claude Code clients gate body fields (context_management, 1M context)
+        # behind their own beta entries; dropping them makes upstream reject the
+        # already-forwarded body with "Extra inputs are not permitted".
+        if client_betas:
+            for entry in client_betas.split(","):
+                cleaned = entry.strip()
+                if cleaned and cleaned not in betas:
+                    betas.append(cleaned)
         if self._needs_effort_beta(request) and EFFORT_BETA_HEADER not in betas:
             betas.append(EFFORT_BETA_HEADER)
         return ",".join(betas)

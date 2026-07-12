@@ -119,17 +119,19 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
         rejection = _reject_unauthorized(raw_request, settings.api_key)
         if rejection is not None:
             return rejection
+        client_betas = raw_request.headers.get("anthropic-beta")
         try:
             if request.stream:
-                client, upstream = await service.open_stream(request)
+                client, upstream = await service.open_stream(request, client_betas)
                 return StreamingResponse(
                     upstream.aiter_raw(),
                     status_code=upstream.status_code,
                     media_type=upstream.headers.get("content-type", "text/event-stream"),
+                    headers=ClaudeCodeProxyService.passthrough_headers(upstream.headers),
                     background=BackgroundTask(_close_stream, client, upstream),
                 )
 
-            body, media_type = await service.forward_json(request)
+            body, media_type, passthrough = await service.forward_json(request, client_betas)
         except ClaudeCodeUpstreamError as exc:
             return Response(
                 content=exc.body,
@@ -143,6 +145,6 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
-        return Response(content=body, media_type=media_type)
+        return Response(content=body, media_type=media_type, headers=passthrough)
 
     return app

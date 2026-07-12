@@ -26,7 +26,10 @@ _REMOTE = ("192.168.1.50", 55002)
 class _AsyncResponse:
     def __init__(self, payload: dict):
         self.status_code = 200
-        self.headers = {"content-type": "application/json"}
+        self.headers = {
+            "content-type": "application/json",
+            "anthropic-ratelimit-unified-5h-utilization": "0.42",
+        }
         self.content = json.dumps(payload).encode("utf-8")
 
 
@@ -157,6 +160,34 @@ def test_unparseable_peer_treated_as_remote(monkeypatch):
 
     assert response.status_code == 401
     assert calls == []
+
+
+def test_client_beta_header_is_merged_into_upstream_request(monkeypatch):
+    client, calls = _client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    response = client.post(
+        "/v1/messages",
+        json={**_BODY, "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]}},
+        headers={"anthropic-beta": "context-management-2025-06-27, claude-code-20250219"},
+    )
+
+    assert response.status_code == 200
+    betas = calls[0]["headers"]["anthropic-beta"].split(",")
+    assert "context-management-2025-06-27" in betas
+    assert betas.count("claude-code-20250219") == 1
+    # The extra body field must reach upstream untouched.
+    assert calls[0]["json"]["context_management"] == {
+        "edits": [{"type": "clear_tool_uses_20250919"}]
+    }
+
+
+def test_ratelimit_headers_are_passed_back_to_client(monkeypatch):
+    client, _ = _client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    response = client.post("/v1/messages", json=_BODY)
+
+    assert response.status_code == 200
+    assert response.headers["anthropic-ratelimit-unified-5h-utilization"] == "0.42"
 
 
 def test_health_stays_open_for_remote_clients(monkeypatch):

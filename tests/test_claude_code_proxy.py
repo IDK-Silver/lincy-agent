@@ -117,7 +117,7 @@ async def test_proxy_service_injects_required_prompt_and_preserves_cache_control
         messages=[ClaudeCodeMessagePayload(role="user", content="hi")],
     )
 
-    body, media_type = await service.forward_json(request)
+    body, media_type, _ = await service.forward_json(request)
 
     assert media_type == "application/json"
     assert json.loads(body)["content"][0]["text"] == "ok"
@@ -126,6 +126,55 @@ async def test_proxy_service_injects_required_prompt_and_preserves_cache_control
     assert payload["system"][1]["cache_control"] == {"type": "ephemeral"}
     assert calls[0]["headers"]["Authorization"] == "Bearer imported-token"
     assert EFFORT_BETA_HEADER in calls[0]["headers"]["anthropic-beta"].split(",")
+
+
+@pytest.mark.asyncio
+async def test_forward_json_merges_client_betas_without_duplicates(monkeypatch):
+    effects = [(200, {"content": [{"type": "text", "text": "ok"}]})]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = ClaudeCodeProxyService(
+        ClaudeCodeProxySettings(access_token="Bearer imported-token")
+    )
+
+    await service.forward_json(
+        _request(),
+        client_betas="context-management-2025-06-27, claude-code-20250219",
+    )
+
+    betas = calls[0]["headers"]["anthropic-beta"].split(",")
+    assert "context-management-2025-06-27" in betas
+    assert betas.count("claude-code-20250219") == 1
+
+
+@pytest.mark.asyncio
+async def test_forward_json_passes_through_ratelimit_headers(monkeypatch):
+    effects = [(200, {"content": [{"type": "text", "text": "ok"}]})]
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _AsyncClientWithHeaders(effects, calls),
+    )
+    service = ClaudeCodeProxyService(
+        ClaudeCodeProxySettings(access_token="Bearer imported-token")
+    )
+
+    _, _, passthrough = await service.forward_json(_request())
+
+    assert passthrough == {"anthropic-ratelimit-unified-5h-utilization": "0.42"}
+
+
+class _AsyncClientWithHeaders(_AsyncClient):
+    """Mock client whose responses carry rate-limit headers."""
+
+    async def post(self, url: str, headers: dict, json: dict):
+        response = await super().post(url, headers=headers, json=json)
+        response.headers = {
+            "content-type": "application/json",
+            "anthropic-ratelimit-unified-5h-utilization": "0.42",
+            "request-id": "req_x",
+        }
+        return response
 
 
 @pytest.mark.asyncio
@@ -162,7 +211,7 @@ async def test_forward_json_fails_over_to_next_token_on_401(monkeypatch, tmp_pat
     _patch_async_httpx(monkeypatch, effects, calls)
 
     service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
-    body, _ = await service.forward_json(_request())
+    body, _, _ = await service.forward_json(_request())
 
     assert json.loads(body)["content"][0]["text"] == "ok"
     assert calls[0]["headers"]["Authorization"] == "Bearer tok-primary"
@@ -191,7 +240,7 @@ async def test_forward_json_fails_over_to_next_token_on_429(monkeypatch, tmp_pat
     )
 
     service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
-    body, _ = await service.forward_json(_request())
+    body, _, _ = await service.forward_json(_request())
 
     assert json.loads(body)["content"][0]["text"] == "ok"
     assert calls[0]["headers"]["Authorization"] == "Bearer tok-primary"
@@ -220,7 +269,7 @@ async def test_forward_json_fails_over_to_next_token_on_read_timeout(monkeypatch
     )
 
     service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
-    body, _ = await service.forward_json(_request())
+    body, _, _ = await service.forward_json(_request())
 
     assert json.loads(body)["content"][0]["text"] == "ok"
     assert calls[0]["headers"]["Authorization"] == "Bearer tok-primary"
