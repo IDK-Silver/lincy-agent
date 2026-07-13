@@ -198,8 +198,10 @@ class ClaudeCodeClient:
         return system_blocks, converted
 
     @staticmethod
-    def _convert_tools(tools: list[ToolDefinition]) -> list[AnthropicTool]:
-        converted: list[AnthropicTool] = []
+    def _convert_tools(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
+        # ClaudeCodeRequest.tools carries raw dicts (proxy passthrough), so
+        # dump the typed models after using them for shape validation.
+        converted: list[dict[str, Any]] = []
         for tool in tools:
             schema = tool.to_json_schema()
             converted.append(
@@ -210,7 +212,7 @@ class ClaudeCodeClient:
                         properties=schema["properties"],
                         required=schema["required"],
                     ),
-                )
+                ).model_dump()
             )
         return converted
 

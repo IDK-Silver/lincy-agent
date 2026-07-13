@@ -225,6 +225,35 @@ def test_client_beta_header_is_merged_into_upstream_request(monkeypatch):
     }
 
 
+def test_server_tools_without_input_schema_pass_through(monkeypatch):
+    """Server tools (advisor, web_search, ...) lack description/input_schema.
+
+    Regression: strict tool validation returned 422 before the request ever
+    reached upstream. Tools must be forwarded verbatim, extra fields included.
+    """
+    client, calls = _client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    tools = [
+        {
+            "name": "Bash",
+            "description": "Run a command",
+            "input_schema": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+                "$schema": "http://json-schema.org/draft-07/schema#",
+            },
+        },
+        {"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-4-6"},
+    ]
+
+    response = client.post("/v1/messages", json={**_BODY, "tools": tools})
+
+    assert response.status_code == 200
+    assert calls[0]["json"]["tools"] == tools
+
+
 def test_ratelimit_headers_are_passed_back_to_client(monkeypatch):
     client, _ = _client(monkeypatch, api_key=None, peer=_LOOPBACK)
 

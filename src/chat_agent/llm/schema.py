@@ -411,7 +411,10 @@ class ClaudeCodeRequest(BaseModel):
     messages: list[ClaudeCodeMessagePayload]
     max_tokens: int
     system: str | list[str | dict[str, Any]] | None = None
-    tools: list[AnthropicTool] | None = None
+    # Kept as raw dicts: the proxy must forward tools verbatim. Server tools
+    # (e.g. advisor_20260301) have no description/input_schema, and typed
+    # validation would also strip unknown JSON-schema fields upstream accepts.
+    tools: list[dict[str, Any]] | None = None
     thinking: dict[str, Any] | None = None
     output_config: dict[str, Any] | None = None
     temperature: float | None = None
