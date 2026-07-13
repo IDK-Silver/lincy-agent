@@ -281,16 +281,18 @@ class ClaudeCodeProxyService:
         # when a later fetch fails (the OAuth endpoints rate-limit under load).
         self._last_good_usage: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
 
-    async def usage_snapshot(self) -> dict[str, Any]:
+    async def usage_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         """Report account identity, 5h/7d utilization, and models per pool token.
 
         One failing account must not break the snapshot: fetch errors are
         reported per entry. The whole snapshot is cached briefly (the lock also
-        collapses concurrent dashboard refreshes into one upstream sweep).
+        collapses concurrent dashboard refreshes into one upstream sweep);
+        force_refresh bypasses the cache read for the dashboard's manual
+        refresh button, but still stores the fresh result.
         """
 
         async with self._usage_lock:
-            if self._usage_cache is not None:
+            if self._usage_cache is not None and not force_refresh:
                 fetched_at, cached = self._usage_cache
                 if _now() - fetched_at < USAGE_CACHE_TTL_SECONDS:
                     return cached

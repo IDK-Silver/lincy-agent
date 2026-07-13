@@ -105,7 +105,7 @@ Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
 
 - 每帳號一列：狀態點（active 綠 / standby 灰 / benched 琥珀 / unusable 紅）、email、plan 標籤（rate_limit_tier 美化）、5h 與 Week 用量條（<70% 黑、70-90% 琥珀、≥90% 紅）與重置時間
 - 底部列出 active 帳號可用的 model id（來源 proxy `/v1/models` passthrough）
-- 資料來源 `/api/claude-accounts`，60s 輪詢；proxy 端 snapshot 另有 60s 快取（對齊輪詢頻率）
+- 資料來源 `/api/claude-accounts`，3 分鐘輪詢；卡片右上有手動 Refresh 按鈕，帶 `?refresh=true` 繞過 proxy 端 60s snapshot 快取強制重抓
 - 帳號用量抓取失敗（如 OAuth endpoint 429）時顯示上次成功資料，錯誤降為灰字 `stale — ...` 註記；完全沒有資料才顯示紅字錯誤
 
 ### 視覺風格

@@ -96,7 +96,8 @@ export interface ClaudeAccountsResponse {
   error: string | null
 }
 
-export async function fetchClaudeAccounts(): Promise<ClaudeAccountsResponse> {
-  const res = await fetch(`${BASE}/api/claude-accounts`)
+export async function fetchClaudeAccounts(refresh = false): Promise<ClaudeAccountsResponse> {
+  const query = refresh ? '?refresh=true' : ''
+  const res = await fetch(`${BASE}/api/claude-accounts${query}`)
   return res.json()
 }

@@ -343,6 +343,17 @@ def test_usage_snapshot_is_cached_between_requests(monkeypatch):
     assert len(calls) == upstream_calls  # served from cache, no new upstream calls
 
 
+def test_usage_refresh_param_bypasses_cache(monkeypatch):
+    client, calls = _usage_client(monkeypatch, api_key=None, peer=_LOOPBACK)
+
+    client.get("/usage")
+    upstream_calls = len(calls)
+    response = client.get("/usage?refresh=true")
+
+    assert response.status_code == 200
+    assert len(calls) > upstream_calls  # cache skipped, upstream swept again
+
+
 def test_usage_requires_key_for_remote_clients(monkeypatch):
     client, calls = _usage_client(monkeypatch, api_key="secret", peer=_REMOTE)
 

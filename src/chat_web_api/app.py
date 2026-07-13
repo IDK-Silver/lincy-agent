@@ -44,12 +44,18 @@ async def _post_web_chat_message_to_control(
     return response.status_code, payload
 
 
-async def _fetch_claude_proxy_usage(settings: WebApiSettings) -> tuple[int, dict]:
+async def _fetch_claude_proxy_usage(
+    settings: WebApiSettings,
+    refresh: bool = False,
+) -> tuple[int, dict]:
     """Fetch account usage + model list from the local Claude Code proxy."""
     # Snapshot may refresh tokens and sweep several upstream endpoints.
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{settings.claude_proxy_base_url}/usage")
+            response = await client.get(
+                f"{settings.claude_proxy_base_url}/usage",
+                params={"refresh": "true"} if refresh else None,
+            )
     except httpx.RequestError:
         return 503, {"error": "claude-code-proxy is unavailable"}
 
@@ -237,8 +243,8 @@ def create_app(settings: WebApiSettings) -> FastAPI:
         return status
 
     @app.get("/api/claude-accounts")
-    async def claude_accounts() -> dict:
-        status_code, payload = await _fetch_claude_proxy_usage(settings)
+    async def claude_accounts(refresh: bool = False) -> dict:
+        status_code, payload = await _fetch_claude_proxy_usage(settings, refresh)
         accounts = payload.get("accounts") if isinstance(payload, dict) else None
         if status_code != 200 or not isinstance(accounts, list):
             error = payload.get("error") if isinstance(payload, dict) else None

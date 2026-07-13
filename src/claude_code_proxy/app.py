@@ -128,11 +128,11 @@ def create_app(settings: ClaudeCodeProxySettings) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/usage")
-    async def usage(raw_request: Request):
+    async def usage(raw_request: Request, refresh: bool = False):
         rejection = _reject_unauthorized(raw_request, settings.api_key)
         if rejection is not None:
             return rejection
-        return await service.usage_snapshot()
+        return await service.usage_snapshot(force_refresh=refresh)
 
     @app.get("/v1/models")
     async def models(raw_request: Request):

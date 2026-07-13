@@ -1,26 +1,31 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { RefreshCw } from 'lucide-vue-next'
 import { fetchClaudeAccounts, type ClaudeAccountsResponse } from '@/api/client'
 
-const REFRESH_MS = 60_000
+const REFRESH_MS = 180_000
 
 const data = ref<ClaudeAccountsResponse | null>(null)
 const loading = ref(true)
+const refreshing = ref(false)
 let timer: number | undefined
 
-async function refresh() {
+async function refresh(force = false) {
+  if (refreshing.value) return
+  refreshing.value = true
   try {
-    data.value = await fetchClaudeAccounts()
+    data.value = await fetchClaudeAccounts(force)
   } catch {
     data.value = { available: false, accounts: [], models: [], error: 'request failed' }
   } finally {
     loading.value = false
+    refreshing.value = false
   }
 }
 
 onMounted(() => {
   refresh()
-  timer = window.setInterval(refresh, REFRESH_MS)
+  timer = window.setInterval(() => refresh(), REFRESH_MS)
 })
 
 onUnmounted(() => {
@@ -73,7 +78,19 @@ function planLabel(tier: string | null | undefined, planType: string | null | un
 
 <template>
   <div class="border border-[#E5E7EB] rounded-lg p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
-    <div class="text-sm font-medium text-[#111827] mb-3">Claude Accounts</div>
+    <div class="flex items-center justify-between mb-3">
+      <div class="text-sm font-medium text-[#111827]">Claude Accounts</div>
+      <button
+        type="button"
+        class="flex items-center gap-1 text-[11px] text-[#6B7280] border border-[#E5E7EB] rounded px-2 py-1 hover:text-[#111827] hover:border-[#D1D5DB] disabled:opacity-50"
+        :disabled="refreshing"
+        title="Refresh now (bypasses cache)"
+        @click="refresh(true)"
+      >
+        <RefreshCw class="h-3 w-3" :class="refreshing ? 'animate-spin' : ''" />
+        Refresh
+      </button>
+    </div>
 
     <div v-if="loading" class="text-xs text-[#6B7280]">Loading…</div>
     <div v-else-if="!data || !data.available" class="text-xs text-[#6B7280]">
