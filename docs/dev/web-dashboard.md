@@ -110,7 +110,7 @@ Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
 
 - 每帳號一列：狀態點（active 綠 / standby 灰 / benched 琥珀 / unusable 紅）、email、plan 標籤。狀態文字改為 dot 的 `title` tooltip，不再另外顯示 ACTIVE/STANDBY 等文字；plan 標籤縮短（`rate_limit_tier`/`plan_type` 去掉 `default_`、`claude_` 前綴並 title-case，例：`default_claude_max_5x` → `Max 5x`、`claude_pro` → `Pro`、`default_claude_ai` → `AI`）
 - 用量改為對齊的單欄 meter rows（每帳號一個 grid，欄位對齊）：一列一個時間窗，依序 label、bar（<70% 黑、70-90% 琥珀、≥90% 紅）、% 與重置時間，涵蓋 5h、Week，以及 model-scoped weekly（如 Fable）；model-scoped 列來源是 proxy 解析 OAuth usage `limits[]` 中 `kind=weekly_scoped` 的項目（以 `scope.model.display_name` 當 label），在 `/api/claude-accounts` 回應以 `usage.seven_day_scoped` 欄位輸出
-- 底部列出 active 帳號可用的 model id（來源 proxy `/v1/models` passthrough），呈現為單行 mono 文字列表（`·` 分隔），不再是逐個 bordered chip
+- 底部列出 active 帳號可用的 model id（來源 proxy `/v1/models` passthrough），呈現為 mono 文字列表（`·` 分隔）；預設收合，點「Models (N)」disclosure 展開
 - 資料來源 `/api/claude-accounts`，3 分鐘輪詢；卡片右上有手動 Refresh 按鈕，帶 `?refresh=true` 繞過 proxy 端 60s snapshot 快取強制重抓
 - 帳號用量抓取失敗（如 OAuth endpoint 429）時顯示上次成功資料，錯誤降為灰字 `stale — ...` 註記；完全沒有資料才顯示紅字錯誤
 

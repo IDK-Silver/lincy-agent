@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { ArrowUp, Plus, RefreshCw, X } from 'lucide-vue-next'
+import { ArrowUp, ChevronRight, Plus, RefreshCw, X } from 'lucide-vue-next'
 import {
   beginClaudeLogin,
   completeClaudeLogin,
@@ -20,6 +20,9 @@ const refreshing = ref(false)
 const actionBusy = ref(false)
 const actionError = ref<string | null>(null)
 let timer: number | undefined
+
+// Model ids are reference info only; keep them collapsed by default.
+const modelsOpen = ref(false)
 
 const login = ref<ClaudeLoginBegin | null>(null)
 const loginCode = ref('')
@@ -349,8 +352,20 @@ function usageRows(acct: ClaudeAccount): UsageRow[] {
       </div>
 
       <div v-if="data.models.length" class="mt-3 pt-3 border-t border-[#E5E7EB]">
-        <div class="text-[10px] text-[#6B7280] uppercase tracking-wide mb-1">Models</div>
-        <div class="text-[11px] font-mono text-[#6B7280] leading-relaxed break-words">{{ data.models.map((m) => m.id).join(' · ') }}</div>
+        <button
+          type="button"
+          class="flex items-center gap-1 text-[10px] text-[#6B7280] uppercase tracking-wide hover:text-[#111827]"
+          @click="modelsOpen = !modelsOpen"
+        >
+          <ChevronRight class="h-3 w-3 transition-transform" :class="modelsOpen ? 'rotate-90' : ''" />
+          Models ({{ data.models.length }})
+        </button>
+        <div
+          v-if="modelsOpen"
+          class="mt-1 text-[11px] font-mono text-[#6B7280] leading-relaxed break-words"
+        >
+          {{ data.models.map((m) => m.id).join(' · ') }}
+        </div>
       </div>
     </div>
   </div>
