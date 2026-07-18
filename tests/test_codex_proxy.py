@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
-from codex_proxy.service import CodexProxyService
+from codex_proxy.auth import CODEX_AUTH_FALLBACK_TOKEN_ID, StoredCodexToken, StoredCodexTokenStore
+from codex_proxy.service import (
+    FAILURE_COOLDOWN_SECONDS,
+    CodexProxyService,
+    CodexTokenManager,
+    CodexTokenUnavailableError,
+    CodexUpstreamError,
+)
 from codex_proxy.settings import CodexProxySettings
 from chat_agent.llm.schema import (
     CodexCompactRequest,
@@ -47,7 +56,9 @@ def _settings_with_codex_auth(tmp_path: Path, *, account_id: str) -> CodexProxyS
             }
         )
     )
-    return CodexProxySettings(codex_auth_path=auth_path)
+    # Point the store at an empty tmp path so the official auth file is the
+    # only pool entry, instead of touching the real default token store.
+    return CodexProxySettings(codex_auth_path=auth_path, token_path=tmp_path / "tokens.json")
 
 
 class _AsyncResponse:
@@ -94,14 +105,71 @@ class _AsyncClient:
         if data is not None:
             call["data"] = data
         self._calls.append(call)
-        return self._effects.pop(0)
+        effect = self._effects.pop(0)
+        if isinstance(effect, Exception):
+            raise effect
+        return effect
 
 
-def _patch_async_httpx(monkeypatch, effects: list[_AsyncResponse], calls: list[dict]) -> None:
+def _patch_async_httpx(
+    monkeypatch, effects: list[_AsyncResponse | Exception], calls: list[dict]
+) -> None:
     monkeypatch.setattr(
         "codex_proxy.service.httpx.AsyncClient",
         lambda timeout: _AsyncClient(effects, calls),
     )
+
+
+def _fresh_token(
+    *,
+    token_id: str,
+    account_id: str,
+    created_at: datetime,
+    refresh_token: str | None = None,
+) -> StoredCodexToken:
+    return StoredCodexToken(
+        id=token_id,
+        access_token=_make_fake_jwt(account_id=account_id),
+        refresh_token=refresh_token,
+        account_id=account_id,
+        expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+        source="oauth_browser",
+        client_id="client-id",
+        created_at=created_at,
+    )
+
+
+def _expired_token(
+    *,
+    token_id: str,
+    account_id: str,
+    created_at: datetime,
+    refresh_token: str | None = "refresh-old",
+) -> StoredCodexToken:
+    return StoredCodexToken(
+        id=token_id,
+        access_token=_make_fake_jwt(account_id=account_id, exp=1_700_000_000),
+        refresh_token=refresh_token,
+        account_id=account_id,
+        expires_at=datetime.now(tz=UTC) - timedelta(hours=1),
+        source="oauth_browser",
+        client_id="client-id",
+        created_at=created_at,
+    )
+
+
+def _request(model: str = "gpt-5.4") -> CodexNativeRequest:
+    return CodexNativeRequest(model=model, messages=[Message(role="user", content="hi")])
+
+
+def _isolated_settings(tmp_path: Path, *, token_path: Path) -> CodexProxySettings:
+    """Settings pinned away from any real ~/.codex/auth.json on this machine.
+
+    Pool tests care only about the store; a developer's own `codex login`
+    state must never leak in as a surprise extra pool entry.
+    """
+
+    return CodexProxySettings(codex_auth_path=tmp_path / "no-official-auth.json", token_path=token_path)
 
 
 @pytest.mark.asyncio
@@ -176,7 +244,9 @@ async def test_proxy_service_refreshes_expired_official_codex_auth(
     ]
     calls: list[dict] = []
     _patch_async_httpx(monkeypatch, effects, calls)
-    service = CodexProxyService(CodexProxySettings(codex_auth_path=auth_path))
+    service = CodexProxyService(
+        CodexProxySettings(codex_auth_path=auth_path, token_path=tmp_path / "tokens.json")
+    )
 
     response = await service.chat(
         CodexNativeRequest(
@@ -388,3 +458,398 @@ async def test_proxy_service_calls_compact_endpoint_and_maps_compaction_items(
     assert calls[0]["url"].endswith("/codex/responses/compact")
     assert calls[0]["json"]["instructions"] == "You are helpful."
     assert response.messages[0].codex_compaction_encrypted_content == "enc_123"
+
+
+# --- Token pool: priority, dedup, benching ---
+
+
+@pytest.mark.asyncio
+async def test_acquire_prioritizes_store_tokens_over_official_auth(tmp_path: Path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(account_id="acct_official"),
+                    "refresh_token": "refresh-official",
+                },
+            }
+        )
+    )
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(
+        _fresh_token(
+            token_id="store-tok", account_id="acct_store", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    manager = CodexTokenManager(CodexProxySettings(codex_auth_path=auth_path, token_path=store_path))
+
+    token, token_id = await manager.acquire()
+
+    assert token_id == "store-tok"
+    assert token.account_id == "acct_store"
+
+
+@pytest.mark.asyncio
+async def test_official_auth_deduped_when_store_has_same_account(tmp_path: Path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(account_id="acct_shared"),
+                    "refresh_token": "refresh-official",
+                },
+            }
+        )
+    )
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(
+        _fresh_token(
+            token_id="store-tok", account_id="acct_shared", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    manager = CodexTokenManager(CodexProxySettings(codex_auth_path=auth_path, token_path=store_path))
+
+    entries = await manager.pool_entries()
+
+    assert [e.token_id for e in entries] == ["store-tok"]
+
+
+@pytest.mark.asyncio
+async def test_official_auth_included_when_account_differs_from_store(tmp_path: Path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(account_id="acct_official"),
+                    "refresh_token": "refresh-official",
+                },
+            }
+        )
+    )
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(
+        _fresh_token(
+            token_id="store-tok", account_id="acct_store", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    manager = CodexTokenManager(CodexProxySettings(codex_auth_path=auth_path, token_path=store_path))
+
+    entries = await manager.pool_entries()
+
+    assert [e.token_id for e in entries] == ["store-tok", CODEX_AUTH_FALLBACK_TOKEN_ID]
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_benches_token_and_rejoins_after_cooldown(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="backup", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("codex_proxy.service._now", lambda: clock["t"])
+    manager = CodexTokenManager(_isolated_settings(tmp_path, token_path=store_path))
+
+    _, token_id = await manager.acquire()
+    assert token_id == "primary"
+
+    manager.mark_failed("primary")
+    _, token_id = await manager.acquire()
+    assert token_id == "backup"
+
+    clock["t"] += FAILURE_COOLDOWN_SECONDS + 1
+    _, token_id = await manager.acquire()
+    assert token_id == "primary"
+
+
+@pytest.mark.asyncio
+async def test_pool_entries_reports_benched_status(tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="backup", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    manager = CodexTokenManager(_isolated_settings(tmp_path, token_path=store_path))
+    manager.mark_failed("primary")
+
+    entries = await manager.pool_entries()
+
+    assert [(e.token_id, e.benched) for e in entries] == [("primary", True), ("backup", False)]
+
+
+@pytest.mark.asyncio
+async def test_token_manager_raises_when_no_tokens_available(tmp_path: Path):
+    service = CodexProxyService(
+        CodexProxySettings(
+            codex_auth_path=tmp_path / "missing-auth.json", token_path=tmp_path / "tokens.json"
+        )
+    )
+    with pytest.raises(CodexTokenUnavailableError, match="proxy codex login"):
+        await service.chat(_request())
+
+
+# --- Refresh writeback: store tokens persist, official-file tokens do not ---
+
+
+@pytest.mark.asyncio
+async def test_store_token_refresh_writes_back_to_store(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(
+        _expired_token(
+            token_id="tok", account_id="acct_old", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
+    )
+    refreshed_access_token = _make_fake_jwt(account_id="acct_old")
+    effects = [
+        _AsyncResponse(
+            json.dumps({"access_token": refreshed_access_token, "refresh_token": "refresh-next"}),
+            headers={"content-type": "application/json"},
+        )
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    manager = CodexTokenManager(_isolated_settings(tmp_path, token_path=store_path))
+
+    token, token_id = await manager.acquire()
+
+    assert token_id == "tok"
+    assert token.source == "oauth_refresh"
+    assert token.access_token == refreshed_access_token
+    stored = StoredCodexTokenStore(store_path).load_all()
+    assert len(stored) == 1
+    assert stored[0].access_token == refreshed_access_token
+    assert stored[0].source == "oauth_refresh"
+
+
+@pytest.mark.asyncio
+async def test_official_auth_refresh_stays_in_memory_and_never_touches_the_file(
+    monkeypatch, tmp_path: Path
+):
+    auth_path = tmp_path / "auth.json"
+    original_text = json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-04-11T01:02:03Z",
+            "tokens": {
+                "access_token": _make_fake_jwt(account_id="acct_official", exp=1_700_000_000),
+                "refresh_token": "refresh-official",
+            },
+        }
+    )
+    auth_path.write_text(original_text)
+    store_path = tmp_path / "tokens.json"
+    refreshed_access_token = _make_fake_jwt(account_id="acct_official")
+    effects = [
+        _AsyncResponse(
+            json.dumps({"access_token": refreshed_access_token, "refresh_token": "refresh-next"}),
+            headers={"content-type": "application/json"},
+        )
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    manager = CodexTokenManager(CodexProxySettings(codex_auth_path=auth_path, token_path=store_path))
+
+    token, token_id = await manager.acquire()
+
+    assert token_id == CODEX_AUTH_FALLBACK_TOKEN_ID
+    assert token.access_token == refreshed_access_token
+    # The official auth file itself must be untouched.
+    assert auth_path.read_text() == original_text
+    # And the refreshed token must not have leaked into the store either.
+    assert StoredCodexTokenStore(store_path).load_all() == []
+
+
+# --- Upstream failover: 401/403/429 and read-timeout ---
+
+
+@pytest.mark.asyncio
+async def test_chat_fails_over_to_next_token_on_401(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="backup", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    sse_ok = "\n\n".join(
+        [
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}',
+        ]
+    )
+    effects = [
+        _AsyncResponse(
+            json.dumps({"error": "unauthorized"}), status_code=401, headers={"content-type": "application/json"}
+        ),
+        _AsyncResponse(sse_ok),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(_isolated_settings(tmp_path, token_path=store_path))
+
+    response = await service.chat(_request())
+
+    assert response.content == "ok"
+    assert calls[0]["headers"]["chatgpt-account-id"] == "acct_a"
+    assert calls[1]["headers"]["chatgpt-account-id"] == "acct_b"
+
+
+@pytest.mark.asyncio
+async def test_chat_fails_over_to_next_token_on_429(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="backup", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    sse_ok = "\n\n".join(
+        [
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}',
+        ]
+    )
+    effects = [
+        _AsyncResponse(
+            json.dumps({"error": "rate_limited"}), status_code=429, headers={"content-type": "application/json"}
+        ),
+        _AsyncResponse(sse_ok),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(_isolated_settings(tmp_path, token_path=store_path))
+
+    response = await service.chat(_request())
+
+    assert response.content == "ok"
+    assert calls[0]["headers"]["chatgpt-account-id"] == "acct_a"
+    assert calls[1]["headers"]["chatgpt-account-id"] == "acct_b"
+
+
+@pytest.mark.asyncio
+async def test_chat_fails_over_to_next_token_on_read_timeout(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="backup", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    sse_ok = "\n\n".join(
+        [
+            'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}',
+        ]
+    )
+    effects = [
+        httpx.ReadTimeout("timed out while waiting for response headers"),
+        _AsyncResponse(sse_ok),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(_isolated_settings(tmp_path, token_path=store_path))
+
+    response = await service.chat(_request())
+
+    assert response.content == "ok"
+    assert calls[0]["headers"]["chatgpt-account-id"] == "acct_a"
+    assert calls[1]["headers"]["chatgpt-account-id"] == "acct_b"
+
+
+@pytest.mark.asyncio
+async def test_chat_surfaces_upstream_error_when_all_tokens_fail(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="a", account_id="acct_a", created_at=datetime(2026, 2, 1, tzinfo=UTC)
+            ),
+            _fresh_token(
+                token_id="b", account_id="acct_b", created_at=datetime(2026, 1, 1, tzinfo=UTC)
+            ),
+        ]
+    )
+    effects = [
+        _AsyncResponse(
+            json.dumps({"error": "unauthorized"}), status_code=401, headers={"content-type": "application/json"}
+        ),
+        _AsyncResponse(
+            json.dumps({"error": "unauthorized"}), status_code=401, headers={"content-type": "application/json"}
+        ),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(_isolated_settings(tmp_path, token_path=store_path))
+
+    with pytest.raises(CodexUpstreamError) as excinfo:
+        await service.chat(_request())
+
+    assert excinfo.value.status_code == 401
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_401_surfaces_upstream_error_when_only_fallback_is_unusable(monkeypatch, tmp_path: Path):
+    # Primary is fresh but gets 401; the only other token is expired with no refresh,
+    # so failover cannot proceed. The client must see the real 401, not a 503.
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).replace_all(
+        [
+            _fresh_token(
+                token_id="primary", account_id="acct_a", created_at=datetime(2026, 6, 1, tzinfo=UTC)
+            ),
+            _expired_token(
+                token_id="backup",
+                account_id="acct_b",
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                refresh_token=None,
+            ),
+        ]
+    )
+    effects = [
+        _AsyncResponse(
+            json.dumps({"error": "unauthorized"}), status_code=401, headers={"content-type": "application/json"}
+        ),
+    ]
+    calls: list[dict] = []
+    _patch_async_httpx(monkeypatch, effects, calls)
+    service = CodexProxyService(_isolated_settings(tmp_path, token_path=store_path))
+
+    with pytest.raises(CodexUpstreamError) as excinfo:
+        await service.chat(_request())
+
+    assert excinfo.value.status_code == 401
+    assert len(calls) == 1  # backup is never called; it is unusable

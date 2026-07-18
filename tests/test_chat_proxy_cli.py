@@ -34,9 +34,12 @@ def test_help_lists_every_provider(capsys):
         assert provider in out
 
 
-def test_codex_login_is_rejected():
+def test_codex_help_lists_login_and_tokens(capsys):
     from codex_proxy.__main__ import main as codex_main
 
-    with pytest.raises(SystemExit) as exc:
-        codex_main(["login"])
-    assert exc.value.code == 2
+    with pytest.raises(SystemExit):
+        codex_main(["--help"])
+    out = capsys.readouterr().out
+    assert "login" in out
+    assert "tokens" in out
+    assert "serve" in out

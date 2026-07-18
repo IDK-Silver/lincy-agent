@@ -51,7 +51,7 @@ Local proxies that forward chat-agent LLM traffic upstream with subscription
 OAuth credentials. One provider per subcommand:
 
   claude-code    Anthropic Claude Code proxy    serve / login / tokens  (:4142)
-  codex          OpenAI Codex proxy             serve                   (:4143)
+  codex          OpenAI Codex proxy             serve / login / tokens  (:4143)
   copilot        GitHub Copilot proxy           serve / login           (:4141)
   grok           xAI SuperGrok proxy            serve / login           (:4144)
 
@@ -59,6 +59,8 @@ examples:
   proxy claude-code login              Log in a Claude account (repeat to add more)
   proxy claude-code tokens list        Show stored Claude tokens
   proxy claude-code serve              Start the Claude Code proxy
+  proxy codex login                    Log in a ChatGPT account (repeat to add more)
+  proxy codex tokens list              Show stored Codex tokens
   proxy copilot login                  GitHub device-code login
   proxy grok serve --port 4200         Serve on a custom port
 

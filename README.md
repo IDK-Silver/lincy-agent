@@ -114,17 +114,35 @@ Headless / SSH 可加 `--no-open-browser`。若 OAuth 登入成功但 inference 
 - `cfgs/llm/grok/grok-4.3/thinking.yaml` 或 `no-thinking.yaml`
 - `cfgs/llm/grok/grok-build-0.1/thinking.yaml`
 
-如果要使用 Codex provider，先用官方 Codex CLI 登入，讓 `~/.codex/auth.json` 存在。codex proxy 只讀這個預設 auth 檔，不維護自己的 token store（`proxy codex login` 會直接報錯並指向 `codex login`）：
+如果要使用 Codex provider，也走獨立 proxy，一樣是「登入 → 啟動」。可以用本專案自己的 browser OAuth、官方 `codex login`（`~/.codex/auth.json`），或兩者並存 —— proxy 會把兩邊帳號合併成一個 failover pool，同帳號自動 dedup：
 
 ```bash
-# Official Codex CLI login
+# 1a. 本專案 browser OAuth login，可重複執行以登入多顆帳號（做 failover）
+uv run proxy codex login
+
+# 1b. 或者沿用官方 CLI 登入，proxy 會自動把 ~/.codex/auth.json 當 fallback 帳號
 codex login
 
-# Start the Codex proxy on http://127.0.0.1:4143
-uv run proxy codex
+# 2. 啟動 proxy on http://127.0.0.1:4143
+uv run proxy codex serve
 ```
 
-codex proxy 啟動後會固定讀 `~/.codex/auth.json`；若 access token 過期，會用檔案內的 refresh token 在記憶體中更新本次 proxy process 的 token，不會改寫官方 auth 檔。如果你只想手動單獨測 Codex，可以把 `cfgs/agent.yaml` 裡對應 agent 的 `llm` 路徑切到：
+`login` 走 browser OAuth：開瀏覽器並在本機起一個監聽 `http://localhost:1455/auth/callback` 的背景 listener 自動接住授權回跳；連不上時（SSH/headless，或官方 `codex login` 占用了 1455）改貼上完整 callback URL 或 `code#state`（`--code`）。token 存在 `tokens.json`，每顆自動配一個 id。`login --from-codex` 可以把目前的官方 auth 狀態匯入成 store 裡一顆獨立、可 promote/remove 的帳號。
+
+### 子命令一覽
+
+| 命令 | 說明 |
+|------|------|
+| `proxy codex login` | Browser OAuth 登入一顆帳號；重複執行可累積多顆做 failover |
+| `proxy codex login --from-codex` | 匯入目前官方 `codex login` 的 auth 狀態成 store 裡一顆帳號 |
+| `proxy codex serve` | 啟動 proxy（不帶命令時的預設行為） |
+| `proxy codex tokens list` | 列出已登入 token（優先級高者在前） |
+| `proxy codex tokens promote <id>` | 把指定 token 提到最前（設為最高優先） |
+| `proxy codex tokens remove <id>` | 移除某顆 token |
+
+serve 的 token pool 依序是：本專案 store（新到舊）→ 官方 `~/.codex/auth.json`（優先級最低的隱式 fallback，固定 id `__codex_auth__`；與 store 某顆同帳號時會被跳過，不會重複出現）。上游回 401/403/429 或等不到 response headers 的 `ReadTimeout` 時會把該顆 bench（預設 5 分鐘冷卻，非永久）並切下一顆重試，語意與 Claude Code proxy 的 multi-account failover 相同。官方 auth 檔那顆過期時只在記憶體 refresh，不會改寫 `~/.codex/auth.json`（該檔案仍由官方 `codex login` 管理）；store 裡的顆過期則 refresh 後寫回 store。`__codex_auth__` 不可 `tokens promote` / `tokens remove`（會回 404 並提示改用官方 `codex login`）。
+
+非 loopback 呼叫 `/usage`、`/login*`、`/tokens*` 這些管理端點需要 `CODEX_PROXY_API_KEY`（`x-api-key` 或 `Authorization: Bearer`），語意與 Claude Code proxy 相同；`/chat`、`/compact`、`/health` 維持免驗（本地 provider client 不送 key）。如果你只想手動單獨測 Codex，可以把 `cfgs/agent.yaml` 裡對應 agent 的 `llm` 路徑切到：
 
 - `cfgs/llm/codex/gpt-5.4/no-thinking.yaml` 或 `cfgs/llm/codex/gpt-5.4/thinking.yaml`
 - `cfgs/llm/codex/gpt-5.4-mini/no-thinking.yaml` 或 `cfgs/llm/codex/gpt-5.4-mini/thinking.yaml`

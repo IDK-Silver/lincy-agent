@@ -45,20 +45,21 @@ async def _post_web_chat_message_to_control(
     return response.status_code, payload
 
 
-async def _fetch_claude_proxy_usage(
-    settings: WebApiSettings,
+async def _fetch_proxy_usage(
+    base_url: str,
+    unavailable_error: str,
     refresh: bool = False,
 ) -> tuple[int, dict]:
-    """Fetch account usage + model list from the local Claude Code proxy."""
+    """Fetch account usage + model list from a local auth proxy."""
     # Snapshot may refresh tokens and sweep several upstream endpoints.
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
-                f"{settings.claude_proxy_base_url}/usage",
+                f"{base_url}/usage",
                 params={"refresh": "true"} if refresh else None,
             )
     except httpx.RequestError:
-        return 503, {"error": "claude-code-proxy is unavailable"}
+        return 503, {"error": unavailable_error}
 
     try:
         payload = response.json()
@@ -67,23 +68,24 @@ async def _fetch_claude_proxy_usage(
     return response.status_code, payload
 
 
-async def _claude_proxy_request(
-    settings: WebApiSettings,
+async def _proxy_request(
+    base_url: str,
+    unavailable_error: str,
     method: str,
     path: str,
     payload: dict | None = None,
 ) -> tuple[int, dict]:
-    """Forward a token-management call to the local Claude Code proxy."""
+    """Forward a token-management call to a local auth proxy."""
     # Login completion performs the upstream OAuth exchange before responding.
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.request(
                 method,
-                f"{settings.claude_proxy_base_url}{path}",
+                f"{base_url}{path}",
                 json=payload,
             )
     except httpx.RequestError:
-        return 503, {"error": "claude-code-proxy is unavailable"}
+        return 503, {"error": unavailable_error}
 
     try:
         data = response.json()
@@ -96,6 +98,12 @@ class ClaudeLoginCompleteRequest(BaseModel):
     """`code#state` pasted back from the Anthropic callback page."""
 
     code: str = Field(min_length=1)
+
+
+class CodexLoginCompleteRequest(BaseModel):
+    """Callback URL or `code#state` pasted back from the OpenAI callback page."""
+
+    value: str = Field(min_length=1)
 
 
 class _WebSocketManager:
@@ -276,7 +284,11 @@ def create_app(settings: WebApiSettings) -> FastAPI:
 
     @app.get("/api/claude-accounts")
     async def claude_accounts(refresh: bool = False) -> dict:
-        status_code, payload = await _fetch_claude_proxy_usage(settings, refresh)
+        status_code, payload = await _fetch_proxy_usage(
+            settings.claude_proxy_base_url,
+            "claude-code-proxy is unavailable",
+            refresh,
+        )
         accounts = payload.get("accounts") if isinstance(payload, dict) else None
         if status_code != 200 or not isinstance(accounts, list):
             error = payload.get("error") if isinstance(payload, dict) else None
@@ -296,15 +308,21 @@ def create_app(settings: WebApiSettings) -> FastAPI:
 
     @app.post("/api/claude-accounts/login")
     async def claude_account_login_begin() -> JSONResponse:
-        status_code, payload = await _claude_proxy_request(settings, "POST", "/login")
+        status_code, payload = await _proxy_request(
+            settings.claude_proxy_base_url,
+            "claude-code-proxy is unavailable",
+            "POST",
+            "/login",
+        )
         return JSONResponse(payload, status_code=status_code)
 
     @app.post("/api/claude-accounts/login/{login_id}/complete")
     async def claude_account_login_complete(
         login_id: str, request: ClaudeLoginCompleteRequest
     ) -> JSONResponse:
-        status_code, payload = await _claude_proxy_request(
-            settings,
+        status_code, payload = await _proxy_request(
+            settings.claude_proxy_base_url,
+            "claude-code-proxy is unavailable",
             "POST",
             f"/login/{login_id}/complete",
             payload={"code": request.code},
@@ -313,15 +331,98 @@ def create_app(settings: WebApiSettings) -> FastAPI:
 
     @app.post("/api/claude-accounts/{token_id}/promote")
     async def claude_account_promote(token_id: str) -> JSONResponse:
-        status_code, payload = await _claude_proxy_request(
-            settings, "POST", f"/tokens/{token_id}/promote"
+        status_code, payload = await _proxy_request(
+            settings.claude_proxy_base_url,
+            "claude-code-proxy is unavailable",
+            "POST",
+            f"/tokens/{token_id}/promote",
         )
         return JSONResponse(payload, status_code=status_code)
 
     @app.delete("/api/claude-accounts/{token_id}")
     async def claude_account_remove(token_id: str) -> JSONResponse:
-        status_code, payload = await _claude_proxy_request(
-            settings, "DELETE", f"/tokens/{token_id}"
+        status_code, payload = await _proxy_request(
+            settings.claude_proxy_base_url,
+            "claude-code-proxy is unavailable",
+            "DELETE",
+            f"/tokens/{token_id}",
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.get("/api/codex-accounts")
+    async def codex_accounts(refresh: bool = False) -> dict:
+        status_code, payload = await _fetch_proxy_usage(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            refresh,
+        )
+        accounts = payload.get("accounts") if isinstance(payload, dict) else None
+        if status_code != 200 or not isinstance(accounts, list):
+            error = payload.get("error") if isinstance(payload, dict) else None
+            return {
+                "available": False,
+                "accounts": [],
+                "models": [],
+                "error": error or f"proxy returned HTTP {status_code}",
+            }
+        models = payload.get("models")
+        return {
+            "available": True,
+            "accounts": accounts,
+            "models": models if isinstance(models, list) else [],
+            "error": None,
+        }
+
+    @app.post("/api/codex-accounts/login")
+    async def codex_account_login_begin() -> JSONResponse:
+        status_code, payload = await _proxy_request(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            "POST",
+            "/login",
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.get("/api/codex-accounts/login/{login_id}")
+    async def codex_account_login_status(login_id: str) -> JSONResponse:
+        status_code, payload = await _proxy_request(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            "GET",
+            f"/login/{login_id}",
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.post("/api/codex-accounts/login/{login_id}/complete")
+    async def codex_account_login_complete(
+        login_id: str, request: CodexLoginCompleteRequest
+    ) -> JSONResponse:
+        status_code, payload = await _proxy_request(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            "POST",
+            f"/login/{login_id}/complete",
+            payload={"value": request.value},
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.post("/api/codex-accounts/{token_id}/promote")
+    async def codex_account_promote(token_id: str) -> JSONResponse:
+        status_code, payload = await _proxy_request(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            "POST",
+            f"/tokens/{token_id}/promote",
+        )
+        return JSONResponse(payload, status_code=status_code)
+
+    @app.delete("/api/codex-accounts/{token_id}")
+    async def codex_account_remove(token_id: str) -> JSONResponse:
+        status_code, payload = await _proxy_request(
+            settings.codex_proxy_base_url,
+            "codex-proxy is unavailable",
+            "DELETE",
+            f"/tokens/{token_id}",
         )
         return JSONResponse(payload, status_code=status_code)
 

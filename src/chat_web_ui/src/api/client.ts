@@ -140,3 +140,88 @@ export async function completeClaudeLogin(
   })
   return responseJsonOrError(res)
 }
+
+export interface CodexUsageWindow {
+  label: string
+  utilization: number | null
+  resets_at: string | null
+}
+
+export interface CodexAccountInfo {
+  email: string | null
+  plan_type: string | null
+}
+
+export interface CodexAccount {
+  id: string
+  source: string
+  priority: number
+  status: 'active' | 'standby' | 'benched' | 'unusable'
+  error: string | null
+  stale: boolean
+  account: CodexAccountInfo | null
+  usage: {
+    windows: CodexUsageWindow[]
+  } | null
+}
+
+export interface CodexModel {
+  id: string
+  display_name: string | null
+}
+
+export interface CodexAccountsResponse {
+  available: boolean
+  accounts: CodexAccount[]
+  models: CodexModel[]
+  error: string | null
+}
+
+export async function fetchCodexAccounts(refresh = false): Promise<CodexAccountsResponse> {
+  const query = refresh ? '?refresh=true' : ''
+  const res = await fetch(`${BASE}/api/codex-accounts${query}`)
+  return res.json()
+}
+
+export async function promoteCodexAccount(tokenId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/codex-accounts/${tokenId}/promote`, { method: 'POST' })
+  return responseJsonOrError(res)
+}
+
+export async function removeCodexAccount(tokenId: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/api/codex-accounts/${tokenId}`, { method: 'DELETE' })
+  return responseJsonOrError(res)
+}
+
+export interface CodexLoginBegin {
+  login_id: string
+  authorization_url: string
+  listener_error?: string | null
+}
+
+export async function beginCodexLogin(): Promise<CodexLoginBegin> {
+  const res = await fetch(`${BASE}/api/codex-accounts/login`, { method: 'POST' })
+  return responseJsonOrError(res)
+}
+
+export interface CodexLoginStatus {
+  status: 'pending' | 'completed' | 'expired'
+  token_id: string | null
+}
+
+export async function fetchCodexLoginStatus(loginId: string): Promise<CodexLoginStatus> {
+  const res = await fetch(`${BASE}/api/codex-accounts/login/${loginId}`)
+  return responseJsonOrError(res)
+}
+
+export async function completeCodexLogin(
+  loginId: string,
+  value: string,
+): Promise<{ ok: boolean; token_id: string }> {
+  const res = await fetch(`${BASE}/api/codex-accounts/login/${loginId}/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value }),
+  })
+  return responseJsonOrError(res)
+}
