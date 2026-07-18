@@ -90,9 +90,30 @@ class OAuthUsageWindow(_TolerantModel):
     resets_at: str | None = None
 
 
+class _OAuthLimitScopeModel(_TolerantModel):
+    id: str | None = None
+    display_name: str | None = None
+
+
+class _OAuthLimitScope(_TolerantModel):
+    # Overrides the base config: this class has a field named `model`, which
+    # collides with pydantic's default protected namespace ("model_").
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    model: _OAuthLimitScopeModel | None = None
+
+
+class OAuthUsageLimit(_TolerantModel):
+    kind: str | None = None
+    percent: float | None = None
+    resets_at: str | None = None
+    scope: _OAuthLimitScope | None = None
+
+
 class OAuthUsagePayload(_TolerantModel):
     five_hour: OAuthUsageWindow | None = None
     seven_day: OAuthUsageWindow | None = None
+    limits: list[OAuthUsageLimit] | None = None
 
 
 class _OAuthProfileAccount(_TolerantModel):
@@ -478,6 +499,22 @@ class ClaudeCodeProxyService:
         usage_out = {
             "five_hour": usage.five_hour.model_dump() if usage.five_hour else None,
             "seven_day": usage.seven_day.model_dump() if usage.seven_day else None,
+            # Model-scoped weekly quotas (Fable/Opus) only show up in limits[] as
+            # kind="weekly_scoped" entries; the legacy per-model fields are null now.
+            "seven_day_scoped": [
+                {
+                    "label": limit.scope.model.display_name,
+                    "utilization": limit.percent,
+                    "resets_at": limit.resets_at,
+                }
+                for limit in (usage.limits or [])
+                if (
+                    limit.kind == "weekly_scoped"
+                    and limit.scope is not None
+                    and limit.scope.model is not None
+                    and limit.scope.model.display_name
+                )
+            ],
         }
         return account, usage_out
 

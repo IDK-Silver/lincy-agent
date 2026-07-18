@@ -63,6 +63,12 @@ export interface ClaudeUsageWindow {
   resets_at: string | null
 }
 
+export interface ClaudeScopedUsageWindow {
+  label: string
+  utilization: number | null
+  resets_at: string | null
+}
+
 export interface ClaudeAccountInfo {
   email: string | null
   display_name: string | null
@@ -80,6 +86,7 @@ export interface ClaudeAccount {
   usage: {
     five_hour: ClaudeUsageWindow | null
     seven_day: ClaudeUsageWindow | null
+    seven_day_scoped?: ClaudeScopedUsageWindow[] | null
   } | null
   stale?: boolean
 }

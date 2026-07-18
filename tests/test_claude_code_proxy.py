@@ -209,6 +209,7 @@ async def test_usage_snapshot_serves_stale_data_when_fetch_fails(monkeypatch):
     first = await service.usage_snapshot()
     assert first["accounts"][0]["stale"] is False
     assert first["accounts"][0]["usage"]["five_hour"]["utilization"] == 3.0
+    assert first["accounts"][0]["usage"]["seven_day_scoped"] == []
 
     state["fail"] = True
     second = await service.usage_snapshot()

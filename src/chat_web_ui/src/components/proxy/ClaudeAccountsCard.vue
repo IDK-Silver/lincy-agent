@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { Plus, RefreshCw } from 'lucide-vue-next'
+import { ArrowUp, Plus, RefreshCw, X } from 'lucide-vue-next'
 import {
   beginClaudeLogin,
   completeClaudeLogin,
@@ -142,8 +142,8 @@ function formatReset(iso: string | null | undefined, withDate: boolean): string 
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
   const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  if (!withDate) return `resets ${hhmm}`
-  return `resets ${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${hhmm}`
+  if (!withDate) return hhmm
+  return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${hhmm}`
 }
 
 function planLabel(tier: string | null | undefined, planType: string | null | undefined): string {
@@ -151,9 +151,35 @@ function planLabel(tier: string | null | undefined, planType: string | null | un
   if (!raw) return ''
   return raw
     .replace(/^default_/, '')
+    .replace(/^claude_/, '')
     .split('_')
-    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+    .map((part) => {
+      if (!part) return part
+      if (part.toLowerCase() === 'ai') return 'AI'
+      return part[0].toUpperCase() + part.slice(1)
+    })
     .join(' ')
+}
+
+interface UsageRow {
+  key: string
+  label: string
+  utilization: number | null | undefined
+  resetsAt: string | null | undefined
+  withDate: boolean
+}
+
+function usageRows(acct: ClaudeAccount): UsageRow[] {
+  const u = acct.usage
+  if (!u) return []
+  const rows: UsageRow[] = [
+    { key: '5h', label: '5h', utilization: u.five_hour?.utilization, resetsAt: u.five_hour?.resets_at, withDate: false },
+    { key: 'week', label: 'Week', utilization: u.seven_day?.utilization, resetsAt: u.seven_day?.resets_at, withDate: true },
+  ]
+  for (const scoped of u.seven_day_scoped ?? []) {
+    rows.push({ key: `scoped:${scoped.label}`, label: scoped.label, utilization: scoped.utilization, resetsAt: scoped.resets_at, withDate: true })
+  }
+  return rows
 }
 </script>
 
@@ -242,97 +268,89 @@ function planLabel(tier: string | null | undefined, planType: string | null | un
       <span class="font-mono">proxy claude-code login</span>.
     </div>
 
-    <div v-else class="space-y-4">
-      <div
-        v-for="acct in data.accounts"
-        :key="acct.id"
-        class="flex flex-col gap-2"
-      >
-        <div class="flex items-center gap-2 min-w-0">
-          <span
-            class="inline-block h-2 w-2 rounded-full shrink-0"
-            :style="{ backgroundColor: STATUS_DOT[acct.status] ?? '#D1D5DB' }"
-          />
-          <span class="text-sm font-medium text-[#111827] truncate" :title="`token ${acct.id}`">
-            {{ acct.account?.email ?? acct.id }}
-          </span>
-          <span
-            v-if="planLabel(acct.account?.rate_limit_tier, acct.account?.plan_type)"
-            class="text-[10px] text-[#6B7280] border border-[#E5E7EB] rounded px-1.5 py-0.5 shrink-0"
-          >
-            {{ planLabel(acct.account?.rate_limit_tier, acct.account?.plan_type) }}
-          </span>
-          <span class="text-[10px] text-[#6B7280] shrink-0 ml-auto uppercase tracking-wide">
-            {{ acct.status }}
-          </span>
-          <button
-            v-if="acct.priority > 0"
-            type="button"
-            class="text-[10px] text-[#6B7280] border border-[#E5E7EB] rounded px-1.5 py-0.5 shrink-0 hover:text-[#111827] hover:border-[#D1D5DB] disabled:opacity-50"
-            :disabled="actionBusy"
-            title="Make this the highest-priority account"
-            @click="promote(acct)"
-          >
-            Promote
-          </button>
-          <button
-            type="button"
-            class="text-[10px] text-[#6B7280] border border-[#E5E7EB] rounded px-1.5 py-0.5 shrink-0 hover:text-[#EF4444] hover:border-[#EF4444] disabled:opacity-50"
-            :disabled="actionBusy"
-            title="Remove this account from the token store"
-            @click="remove(acct)"
-          >
-            Remove
-          </button>
-        </div>
-
-        <div v-if="acct.usage" class="grid grid-cols-2 gap-4">
-          <div v-for="win in [
-            { label: '5h', data: acct.usage.five_hour, withDate: false },
-            { label: 'Week', data: acct.usage.seven_day, withDate: true },
-          ]" :key="win.label">
-            <div class="flex items-baseline justify-between mb-1">
-              <span class="text-[10px] text-[#6B7280] uppercase tracking-wide">{{ win.label }}</span>
-              <span class="text-xs text-[#111827] tabular-nums font-medium">
-                {{ formatUtilization(win.data?.utilization) }}
-              </span>
-            </div>
-            <div class="h-1.5 rounded-full bg-[#F3F4F6] overflow-hidden">
-              <div
-                class="h-full rounded-full"
-                :style="{
-                  width: barWidth(win.data?.utilization),
-                  backgroundColor: barColor(win.data?.utilization),
-                }"
-              />
-            </div>
-            <div class="text-[10px] text-[#6B7280] mt-1 tabular-nums">
-              {{ formatReset(win.data?.resets_at, win.withDate) }}
-            </div>
-          </div>
-        </div>
-
+    <div v-else>
+      <div class="divide-y divide-[#F3F4F6]">
         <div
-          v-if="acct.error"
-          class="text-xs"
-          :class="acct.usage ? 'text-[#6B7280]' : 'text-[#EF4444]'"
+          v-for="acct in data.accounts"
+          :key="acct.id"
+          class="flex flex-col gap-2 py-3 first:pt-0 last:pb-0"
         >
-          {{ acct.stale ? 'stale — ' : '' }}{{ acct.error }}
+          <div class="flex items-center gap-2 min-w-0">
+            <span
+              class="inline-block h-2 w-2 rounded-full shrink-0"
+              :style="{ backgroundColor: STATUS_DOT[acct.status] ?? '#D1D5DB' }"
+              :title="acct.status"
+            />
+            <span
+              class="text-sm font-medium text-[#111827] truncate flex-1 min-w-0"
+              :title="`token ${acct.id} — ${acct.status}`"
+            >
+              {{ acct.account?.email ?? acct.id }}
+            </span>
+            <span
+              v-if="planLabel(acct.account?.rate_limit_tier, acct.account?.plan_type)"
+              class="text-[10px] text-[#6B7280] border border-[#E5E7EB] rounded px-1.5 py-0.5 shrink-0"
+            >
+              {{ planLabel(acct.account?.rate_limit_tier, acct.account?.plan_type) }}
+            </span>
+            <button
+              v-if="acct.priority > 0"
+              type="button"
+              class="p-1 rounded border border-[#E5E7EB] text-[#6B7280] hover:text-[#111827] hover:border-[#D1D5DB] disabled:opacity-50 shrink-0"
+              :disabled="actionBusy"
+              title="Make this the highest-priority account"
+              @click="promote(acct)"
+            >
+              <ArrowUp class="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              class="p-1 rounded border border-[#E5E7EB] text-[#6B7280] hover:text-[#EF4444] hover:border-[#EF4444] disabled:opacity-50 shrink-0"
+              :disabled="actionBusy"
+              title="Remove this account from the token store"
+              @click="remove(acct)"
+            >
+              <X class="h-3 w-3" />
+            </button>
+          </div>
+
+          <div v-if="acct.usage" class="grid grid-cols-[auto_1fr_auto_auto] items-center gap-x-2 gap-y-1">
+            <template v-for="row in usageRows(acct)" :key="row.key">
+              <span class="text-[10px] text-[#6B7280] uppercase tracking-wide">{{ row.label }}</span>
+              <div class="h-1.5 rounded-full bg-[#F3F4F6] overflow-hidden">
+                <div
+                  class="h-full rounded-full"
+                  :style="{
+                    width: barWidth(row.utilization),
+                    backgroundColor: barColor(row.utilization),
+                  }"
+                />
+              </div>
+              <span class="text-xs text-[#111827] tabular-nums font-medium text-right">
+                {{ formatUtilization(row.utilization) }}
+              </span>
+              <span
+                class="text-[10px] text-[#6B7280] tabular-nums whitespace-nowrap text-right"
+                :title="'resets ' + formatReset(row.resetsAt, row.withDate)"
+              >
+                {{ formatReset(row.resetsAt, row.withDate) }}
+              </span>
+            </template>
+          </div>
+
+          <div
+            v-if="acct.error"
+            class="text-xs"
+            :class="acct.usage ? 'text-[#6B7280]' : 'text-[#EF4444]'"
+          >
+            {{ acct.stale ? 'stale — ' : '' }}{{ acct.error }}
+          </div>
         </div>
       </div>
 
-      <div v-if="data.models.length" class="pt-3 border-t border-[#E5E7EB]">
-        <div class="text-[10px] text-[#6B7280] uppercase tracking-wide mb-2">Models</div>
-        <div class="flex flex-wrap gap-1.5">
-          <span
-            v-for="model in data.models"
-            :key="model.id"
-            class="text-[11px] text-[#111827] border border-[#E5E7EB] rounded px-1.5 py-0.5 font-mono"
-            :title="model.display_name ?? model.id"
-          >
-            {{ model.id }}
-          </span>
-        </div>
+      <div v-if="data.models.length" class="mt-3 pt-3 border-t border-[#E5E7EB]">
+        <div class="text-[10px] text-[#6B7280] uppercase tracking-wide mb-1">Models</div>
+        <div class="text-[11px] font-mono text-[#6B7280] leading-relaxed break-words">{{ data.models.map((m) => m.id).join(' · ') }}</div>
       </div>
     </div>
   </div>

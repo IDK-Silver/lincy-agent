@@ -282,6 +282,35 @@ _PROFILE_PAYLOAD = {
 _USAGE_PAYLOAD = {
     "five_hour": {"utilization": 3.0, "resets_at": "2026-07-12T20:29:59+00:00"},
     "seven_day": {"utilization": 1.0, "resets_at": "2026-07-18T23:59:59+00:00"},
+    "limits": [
+        {
+            "kind": "session",
+            "group": "session",
+            "percent": 3,
+            "severity": "normal",
+            "resets_at": "2026-07-12T20:29:59+00:00",
+            "scope": None,
+            "is_active": True,
+        },
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 1,
+            "severity": "normal",
+            "resets_at": "2026-07-18T23:59:59+00:00",
+            "scope": None,
+            "is_active": False,
+        },
+        {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 14,
+            "severity": "normal",
+            "resets_at": "2026-07-18T23:59:59+00:00",
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+            "is_active": False,
+        },
+    ],
 }
 _MODELS_PAYLOAD = {
     "data": [
@@ -358,6 +387,9 @@ def test_usage_reports_account_usage_and_models(monkeypatch):
     assert account["account"]["rate_limit_tier"] == "default_claude_max_5x"
     assert account["usage"]["five_hour"]["utilization"] == 3.0
     assert account["usage"]["seven_day"]["utilization"] == 1.0
+    assert account["usage"]["seven_day_scoped"] == [
+        {"label": "Fable", "utilization": 14, "resets_at": "2026-07-18T23:59:59+00:00"}
+    ]
     assert [m["id"] for m in payload["models"]] == ["claude-opus-4-8", "claude-sonnet-5"]
 
 
