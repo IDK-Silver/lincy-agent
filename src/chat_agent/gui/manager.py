@@ -1,7 +1,15 @@
-"""GUI Manager: agentic tool loop using a Pro LLM to orchestrate desktop tasks."""
+"""GUI Manager: AX-first computer-use agent loop.
+
+The manager LLM drives a local OpenComputerUse MCP server (accessibility
+tree + window screenshot + background input) and sees tool results
+directly, including screenshots. There is no separate vision worker in
+this loop; coordinate clicks are the built-in fallback of the same
+`click` tool for elements without an accessible surface.
+"""
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import random
@@ -22,21 +30,8 @@ from ..llm.schema import (
     make_tool_result_message,
 )
 from ..tools.registry import ToolRegistry, ToolResult
-from .actions import (
-    activate_app,
-    capture_screenshot_to_temp,
-    click_at_bbox,
-    drag_between_bboxes,
-    get_active_app,
-    maximize_window,
-    paste_screenshot_from_temp,
-    press_key,
-    right_click_at_bbox,
-    scroll_at_bbox,
-    take_screenshot,
-    type_text,
-)
-from .worker import GUIWorker
+from .actions import activate_app
+from .mcp_client import MCPError, MCPStdioClient
 
 if TYPE_CHECKING:
     from .session import GUISessionStore
@@ -45,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_STEPS = 20
 _WAIT_CANCEL_POLL_SECONDS = 0.1
+_DEFAULT_TOOL_TIMEOUT = 90.0
+_STALE_STUB_SUFFIX = (
+    "[stale state: screenshot removed; element indexes no longer valid; "
+    "call get_app_state for fresh state]"
+)
 
 _MAX_STEPS_REPORT_PROMPT = (
     "You have reached the step limit. No tools are available. "
@@ -54,247 +54,225 @@ _MAX_STEPS_REPORT_PROMPT = (
     "2. What remains to be done.\n"
     "3. Whether the task seems feasible with more steps, "
     "or if the current approach is fundamentally wrong.\n\n"
-    "Be specific and factual. Reference the last screen state you observed."
+    "Be specific and factual. Reference the last app state you observed."
 )
 
 # Callback: (tool_call, result, step, max_steps, step_elapsed, total_elapsed, worker_timing)
+# worker_timing is always None in the AX-first loop; the slot is kept so the
+# CLI step-printer signature stays unchanged.
 GUIStepCallback = Callable[
     [ToolCall, str, int, int, float, float, dict[str, float] | None], None,
 ]
 
-# --- Manager tool definitions ---
+# --- MCP-backed tool definitions (mirror the pinned server's schemas) ---
 
-_ASK_WORKER_DEF = ToolDefinition(
-    name="ask_worker",
+_APP_PARAM = ToolParameter(
+    type="string",
     description=(
-        "Ask the vision worker to take a screenshot and analyze it. "
-        "Provide a specific instruction like 'Find the Send button' or "
-        "'Describe what is on screen'. Returns text summary + bounding box."
+        "Target app: English app name or bundle id (e.g. 'Calculator', "
+        "'com.apple.finder'). Use names exactly as returned by list_apps."
+    ),
+)
+
+_LIST_APPS_DEF = ToolDefinition(
+    name="list_apps",
+    description=(
+        "List apps on this computer (running state, bundle id, usage). "
+        "Use it to discover the exact app name for the other tools."
+    ),
+    parameters={},
+    required=[],
+)
+
+_GET_APP_STATE_DEF = ToolDefinition(
+    name="get_app_state",
+    description=(
+        "Start or resume controlling an app (launching it if needed) and "
+        "return its key window as an indexed accessibility tree plus a "
+        "window screenshot. Element indexes in the tree are the handles "
+        "for click/scroll/set_value/perform_secondary_action."
     ),
     parameters={
-        "instruction": ToolParameter(
-            type="string",
-            description="What to look for or describe in the current screenshot.",
+        "app": _APP_PARAM,
+        "max_tree_nodes": ToolParameter(
+            type="integer",
+            description="Optional cap on tree nodes returned.",
+        ),
+        "max_tree_depth": ToolParameter(
+            type="integer",
+            description="Optional cap on tree depth returned.",
+        ),
+        "text_limit": ToolParameter(
+            type="integer",
+            description=(
+                "Optional cap on characters per text value in the tree: a "
+                "positive integer, or the string \"max\" for untruncated text. "
+                "Raise it when you need to read long visible text in full."
+            ),
+            json_schema={"type": ["integer", "string"]},
         ),
     },
-    required=["instruction"],
+    required=["app"],
 )
 
 _CLICK_DEF = ToolDefinition(
     name="click",
     description=(
-        "Click at the center of a bounding box. "
-        "The bbox must come from a previous ask_worker result."
+        "Click an element by element_index from the MOST RECENT app state, "
+        "or by window pixel coordinates (x, y) as fallback when the target "
+        "has no accessible element. Returns fresh app state."
     ),
     parameters={
-        "bbox": ToolParameter(
-            type="array",
-            description="Gemini bounding box [ymin, xmin, ymax, xmax], each 0-1000.",
-            json_schema={
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
+        "app": _APP_PARAM,
+        "element_index": ToolParameter(
+            type="string",
+            description="Element index from the latest app state tree.",
+        ),
+        "x": ToolParameter(
+            type="number",
+            description="Fallback: window-local X pixel coordinate.",
+        ),
+        "y": ToolParameter(
+            type="number",
+            description="Fallback: window-local Y pixel coordinate.",
+        ),
+        "mouse_button": ToolParameter(
+            type="string",
+            description="'left' (default) or 'right' for context menus.",
+        ),
+        "click_count": ToolParameter(
+            type="integer",
+            description="1 (default) or 2 for double-click.",
         ),
     },
-    required=["bbox"],
+    required=["app"],
 )
 
-_RIGHT_CLICK_DEF = ToolDefinition(
-    name="right_click",
-    description=(
-        "Right-click at the center of a bounding box to open a context menu. "
-        "Use for actions like 'Save image as...' in browsers."
-    ),
+_DRAG_DEF = ToolDefinition(
+    name="drag",
+    description="Drag from one window pixel coordinate to another.",
     parameters={
-        "bbox": ToolParameter(
-            type="array",
-            description="Gemini bounding box [ymin, xmin, ymax, xmax], each 0-1000.",
-            json_schema={
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        ),
+        "app": _APP_PARAM,
+        "from_x": ToolParameter(type="number", description="Start X."),
+        "from_y": ToolParameter(type="number", description="Start Y."),
+        "to_x": ToolParameter(type="number", description="End X."),
+        "to_y": ToolParameter(type="number", description="End Y."),
     },
-    required=["bbox"],
+    required=["app", "from_x", "from_y", "to_x", "to_y"],
 )
 
 _SCROLL_DEF = ToolDefinition(
     name="scroll",
     description=(
-        "Scroll the mouse wheel at a specific position. "
-        "Use when pagedown/pageup don't work (embedded frames, unfocused panels, "
-        "custom scroll areas). Scroll amount is controlled by system config."
+        "Scroll a scrollable element by a number of pages. "
+        "direction: 'up', 'down', 'left', 'right'."
     ),
     parameters={
-        "bbox": ToolParameter(
-            type="array",
-            description="Gemini bounding box [ymin, xmin, ymax, xmax], each 0-1000.",
-            json_schema={
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
+        "app": _APP_PARAM,
+        "element_index": ToolParameter(
+            type="string",
+            description="Scrollable element index from the latest app state.",
         ),
         "direction": ToolParameter(
             type="string",
-            description="Scroll direction: 'up' or 'down'.",
+            description="'up', 'down', 'left' or 'right'.",
         ),
-    },
-    required=["bbox", "direction"],
-)
-
-_DRAG_DEF = ToolDefinition(
-    name="drag",
-    description=(
-        "Drag from one position to another. "
-        "Use for installing apps (DMG to Applications), file management, "
-        "and UI drag-and-drop. Both bboxes must come from a previous ask_worker result."
-    ),
-    parameters={
-        "from_bbox": ToolParameter(
-            type="array",
-            description="Source bounding box [ymin, xmin, ymax, xmax], each 0-1000.",
-            json_schema={
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        ),
-        "to_bbox": ToolParameter(
-            type="array",
-            description="Destination bounding box [ymin, xmin, ymax, xmax], each 0-1000.",
-            json_schema={
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 4,
-                "maxItems": 4,
-            },
-        ),
-        "duration": ToolParameter(
+        "pages": ToolParameter(
             type="number",
-            description="Drag duration in seconds (default 0.5). Increase if drag fails.",
+            description="Number of pages to scroll (default 1).",
         ),
     },
-    required=["from_bbox", "to_bbox"],
-)
-
-_MAXIMIZE_WINDOW_DEF = ToolDefinition(
-    name="maximize_window",
-    description=(
-        "Maximize the frontmost window of an application to fill the screen. "
-        "Use at the start of any task for better visibility."
-    ),
-    parameters={
-        "app_name": ToolParameter(
-            type="string",
-            description="Application name (e.g. 'Firefox', 'Google Chrome').",
-        ),
-    },
-    required=["app_name"],
+    required=["app", "element_index", "direction"],
 )
 
 _TYPE_TEXT_DEF = ToolDefinition(
     name="type_text",
-    description="Type text at the current cursor position. Supports Unicode.",
-    parameters={
-        "text": ToolParameter(
-            type="string",
-            description="The text to type.",
-        ),
-    },
-    required=["text"],
-)
-
-_KEY_PRESS_DEF = ToolDefinition(
-    name="key_press",
     description=(
-        "Press a key or key combination. "
-        "Examples: 'enter', 'tab', 'escape', 'command+a', 'command+v'."
+        "Type literal text via keyboard events into the target app "
+        "(focus the field first). Supports newlines and Unicode."
     ),
     parameters={
-        "key": ToolParameter(
-            type="string",
-            description="Key name or combo with '+' separator.",
-        ),
+        "app": _APP_PARAM,
+        "text": ToolParameter(type="string", description="Text to type."),
     },
-    required=["key"],
+    required=["app", "text"],
 )
 
-_SCREENSHOT_DEF = ToolDefinition(
-    name="screenshot",
+_PRESS_KEY_DEF = ToolDefinition(
+    name="press_key",
     description=(
-        "Take a screenshot and view it directly. "
-        "Use this when you need to see the screen yourself "
-        "rather than relying on the worker's text summary."
-    ),
-    parameters={},
-    required=[],
-)
-
-_CAPTURE_SCREENSHOT_DEF = ToolDefinition(
-    name="capture_screenshot",
-    description=(
-        "Capture the current screen and save it for later pasting. "
-        "This does NOT put the image in the clipboard immediately. "
-        "Use paste_screenshot when you are ready to paste."
-    ),
-    parameters={},
-    required=[],
-)
-
-_PASTE_SCREENSHOT_DEF = ToolDefinition(
-    name="paste_screenshot",
-    description=(
-        "Copy the previously captured screenshot to the clipboard. "
-        "Call this after all type_text calls are done, then use "
-        "key_press('command+v') to paste the image."
-    ),
-    parameters={},
-    required=[],
-)
-
-_ACTIVATE_APP_DEF = ToolDefinition(
-    name="activate_app",
-    description=(
-        "Open or switch to an application by name. "
-        "Searches installed apps and activates the best match. "
-        "If multiple apps match, returns the list — call again with a more specific name."
+        "Press a key or key-combination (e.g. 'Return', 'Escape', "
+        "'Command+S', 'Down')."
     ),
     parameters={
-        "name": ToolParameter(
+        "app": _APP_PARAM,
+        "key": ToolParameter(type="string", description="Key or combo."),
+    },
+    required=["app", "key"],
+)
+
+_SET_VALUE_DEF = ToolDefinition(
+    name="set_value",
+    description=(
+        "Set the value of a settable element (text field, slider, "
+        "checkbox) directly. Preferred over type_text for text fields "
+        "marked settable in the tree."
+    ),
+    parameters={
+        "app": _APP_PARAM,
+        "element_index": ToolParameter(
             type="string",
-            description="Application name to search for (e.g. 'Terminal', 'LINE', 'Safari').",
+            description="Settable element index from the latest app state.",
+        ),
+        "value": ToolParameter(type="string", description="New value."),
+    },
+    required=["app", "element_index", "value"],
+)
+
+_SECONDARY_ACTION_DEF = ToolDefinition(
+    name="perform_secondary_action",
+    description=(
+        "Invoke a secondary accessibility action listed for an element in "
+        "the tree (e.g. 'Raise', 'Expand', 'Increment', 'zoom the window')."
+    ),
+    parameters={
+        "app": _APP_PARAM,
+        "element_index": ToolParameter(
+            type="string",
+            description="Element index from the latest app state.",
+        ),
+        "action": ToolParameter(
+            type="string",
+            description="Action name exactly as listed in the tree.",
         ),
     },
-    required=["name"],
+    required=["app", "element_index", "action"],
 )
+
+MCP_TOOL_DEFS = [
+    _LIST_APPS_DEF,
+    _GET_APP_STATE_DEF,
+    _CLICK_DEF,
+    _DRAG_DEF,
+    _SCROLL_DEF,
+    _TYPE_TEXT_DEF,
+    _PRESS_KEY_DEF,
+    _SET_VALUE_DEF,
+    _SECONDARY_ACTION_DEF,
+]
+
+# --- Local loop-control tool definitions ---
 
 _WAIT_DEF = ToolDefinition(
     name="wait",
-    description="Wait for a given number of seconds (0.1-10). Use after actions that trigger loading or transitions.",
+    description=(
+        "Wait for a given number of seconds (0.1-10). "
+        "Use after actions that trigger loading or transitions."
+    ),
     parameters={
-        "seconds": ToolParameter(
-            type="number",
-            description="Seconds to wait.",
-        ),
+        "seconds": ToolParameter(type="number", description="Seconds to wait."),
     },
     required=["seconds"],
-)
-
-_GET_ACTIVE_APP_DEF = ToolDefinition(
-    name="get_active_app",
-    description=(
-        "Return the name of the currently focused application. "
-        "Use this after switching apps to verify you are in the correct window."
-    ),
-    parameters={},
-    required=[],
 )
 
 _DONE_DEF = ToolDefinition(
@@ -350,37 +328,14 @@ _REPORT_PROBLEM_DEF = ToolDefinition(
     required=["problem"],
 )
 
-_SCAN_LAYOUT_DEF = ToolDefinition(
-    name="scan_layout",
-    description=(
-        "Analyze the current screen and return a structured description of the "
-        "GUI layout — all visible panels, regions, toolbars, and interactive elements. "
-        "Call this at the START of every task before performing any actions."
-    ),
-    parameters={},
-    required=[],
-)
-
-MANAGER_TOOLS = [
-    _SCAN_LAYOUT_DEF,
-    _ASK_WORKER_DEF,
-    _CLICK_DEF,
-    _RIGHT_CLICK_DEF,
-    _SCROLL_DEF,
-    _DRAG_DEF,
-    _MAXIMIZE_WINDOW_DEF,
-    _TYPE_TEXT_DEF,
-    _KEY_PRESS_DEF,
-    _SCREENSHOT_DEF,
-    _CAPTURE_SCREENSHOT_DEF,
-    _PASTE_SCREENSHOT_DEF,
-    _ACTIVATE_APP_DEF,
+MANAGER_TOOLS = MCP_TOOL_DEFS + [
     _WAIT_DEF,
-    _GET_ACTIVE_APP_DEF,
     _DONE_DEF,
     _FAIL_DEF,
     _REPORT_PROBLEM_DEF,
 ]
+
+_MCP_TOOL_NAMES = {t.name for t in MCP_TOOL_DEFS}
 
 
 class GUITaskResult(BaseModel):
@@ -412,59 +367,56 @@ class _GUICommandCancelled(Exception):
 class GUIManager:
     """Orchestrates GUI automation via an agentic tool loop.
 
-    The Manager LLM decides which tools to call (ask_worker, click, etc.)
-    and loops until done/fail or max_steps is reached.
+    The manager LLM calls MCP-backed AX tools (get_app_state, click, ...)
+    plus local loop-control tools, and loops until done/fail or max_steps.
+    An MCP server subprocess is spawned per task and closed afterwards.
     """
 
     def __init__(
         self,
         client: LLMClient,
-        worker: GUIWorker,
+        mcp_factory: Callable[[], MCPStdioClient],
         system_prompt: str,
         max_steps: int = _MAX_STEPS,
         session_store: GUISessionStore | None = None,
         on_step: GUIStepCallback | None = None,
-        screenshot_max_width: int | None = None,
-        screenshot_quality: int = 80,
-        scroll_invert: bool = False,
-        scroll_max_amount: int = 5,
         is_cancel_requested: Callable[[], bool] | None = None,
-        allow_direct_screenshot: bool = False,
         allow_wait_tool: bool = True,
         step_delay_min: float = 0.0,
         step_delay_max: float = 0.0,
+        keep_full_states: int = 2,
+        stale_text_max_chars: int = 2000,
+        max_tree_nodes: int | None = None,
+        max_tree_depth: int | None = None,
+        tool_timeout: float = _DEFAULT_TOOL_TIMEOUT,
     ):
         self.client = client
-        self.worker = worker
         self.system_prompt = system_prompt
         self.max_steps = max_steps
         self.session_store = session_store
         self.on_step = on_step
-        self._screenshot_max_width = screenshot_max_width
-        self._screenshot_quality = screenshot_quality
-        self._scroll_invert = scroll_invert
-        self._scroll_max_amount = scroll_max_amount
+        self._mcp_factory = mcp_factory
+        self._mcp: MCPStdioClient | None = None
         self._is_cancel_requested = is_cancel_requested
-        self._allow_direct_screenshot = allow_direct_screenshot
         self._step_delay_min = step_delay_min
         self._step_delay_max = max(step_delay_max, step_delay_min)
-        self._last_worker_timing: dict[str, float] | None = None
+        self._keep_full_states = max(keep_full_states, 1)
+        self._stale_text_max_chars = max(stale_text_max_chars, 200)
+        self._max_tree_nodes = max_tree_nodes
+        self._max_tree_depth = max_tree_depth
+        self._tool_timeout = tool_timeout
+        self._last_screenshot = None
         self._capture_temp = os.path.join(
             tempfile.gettempdir(), f"chat_agent_capture_{os.getpid()}.png",
         )
-        # Build tool list: conditionally exclude screenshot / wait
-        _exclude = set()
-        if not allow_direct_screenshot:
-            _exclude.add("screenshot")
+        tools = list(MANAGER_TOOLS)
         if not allow_wait_tool:
-            _exclude.add("wait")
-        self._tools: list[ToolDefinition] = [
-            t for t in MANAGER_TOOLS if t.name not in _exclude
-        ]
+            tools = [t for t in tools if t.name != "wait"]
+        self._tools: list[ToolDefinition] = tools
 
     @property
     def capture_dir(self) -> str:
-        """Directory containing GUI capture temp files."""
+        """Directory holding the final-screenshot file of GUI tasks."""
         return os.path.dirname(self._capture_temp)
 
     def execute_task(
@@ -497,85 +449,51 @@ class GUIManager:
                 session_data = self.session_store.create(intent)
                 gui_session_id = session_data.session_id
 
-        # Build system prompt (base + optional app-specific context)
         system_content = self.system_prompt
         if app_prompt_text:
-            system_content += (
-                "\n\n## App-Specific Guide\n\n" + app_prompt_text
-            )
+            system_content += "\n\n## App-Specific Guide\n\n" + app_prompt_text
 
-        messages = [
-            Message(role="system", content=system_content),
-        ]
+        messages = [Message(role="system", content=system_content)]
 
-        # Inject resume context if we have prior steps
         if resume_context:
-            # Re-activate last known app
             if resume_last_app:
                 try:
                     activate_app(resume_last_app)
                     time.sleep(0.5)
                 except Exception:
                     logger.warning("Failed to re-activate: %s", resume_last_app)
-
-            # Build resume message (multimodal with screenshot or text-only)
-            if self._allow_direct_screenshot:
-                resume_text = (
-                    f"{resume_context}\n\n"
-                    "You are resuming a previous task. "
-                    "The screenshot shows the current screen state. "
-                    "Do NOT repeat already-completed steps."
-                )
-                try:
-                    screenshot_part = take_screenshot(
-                        max_width=self._screenshot_max_width,
-                        quality=self._screenshot_quality,
-                    )
-                    messages.append(Message(role="user", content=[
-                        ContentPart(type="text", text=resume_text),
-                        screenshot_part,
-                        ContentPart(type="text", text=f"New instruction: {intent}"),
-                    ]))
-                except Exception:
-                    logger.warning("Resume screenshot failed, text-only fallback")
-                    messages.append(Message(
-                        role="user",
-                        content=(
-                            f"{resume_context}\n\n"
-                            "You are resuming a previous task. "
-                            "Do NOT repeat already-completed steps.\n\n"
-                            f"New instruction: {intent}"
-                        ),
-                    ))
-            else:
-                # Text-only resume: use worker for screen description
-                resume_text = (
-                    f"{resume_context}\n\n"
-                    "You are resuming a previous task. "
-                    "Do NOT repeat already-completed steps."
-                )
-                screen_desc = ""
-                try:
-                    screen_desc = self.worker.scan_layout()
-                except Exception:
-                    logger.warning("Resume scan_layout failed")
-                if screen_desc:
-                    resume_text += f"\n\nCurrent screen state:\n{screen_desc}"
-                messages.append(Message(
-                    role="user",
-                    content=f"{resume_text}\n\nNew instruction: {intent}",
-                ))
-        else:
             messages.append(Message(
                 role="user",
-                content=f"GUI TASK: {intent}",
+                content=(
+                    f"{resume_context}\n\n"
+                    "You are resuming a previous task. "
+                    "Do NOT repeat already-completed steps. "
+                    "Call get_app_state first to observe the current state.\n\n"
+                    f"New instruction: {intent}"
+                ),
             ))
-
-        registry = self._build_registry()
+        else:
+            messages.append(Message(role="user", content=f"GUI TASK: {intent}"))
 
         steps = 0
         task_start = time.monotonic()
         step_start = time.monotonic()
+        self._last_screenshot = None
+        try:
+            self._mcp = self._mcp_factory()
+            self._mcp.initialize()
+        except MCPError as e:
+            logger.error("MCP server unavailable: %s", e)
+            self._close_mcp()
+            return self._finalize_result(
+                gui_session_id=gui_session_id,
+                task_start=task_start,
+                steps=0,
+                success=False,
+                summary=f"GUI backend unavailable: {e}",
+            )
+
+        registry = self._build_registry()
         try:
             self._raise_if_cancel_requested()
             response = self.client.chat_with_tools(messages, self._tools)
@@ -612,14 +530,8 @@ class GUIManager:
                     elapsed = time.monotonic() - step_start
                     total = time.monotonic() - task_start
 
-                    # Extract worker timing (console only, not in LLM context)
-                    worker_timing: dict[str, float] | None = None
-                    if tool_call.name == "ask_worker" and self._last_worker_timing:
-                        worker_timing = self._last_worker_timing
-                        self._last_worker_timing = None
-
                     if isinstance(content, list):
-                        result_str = "(screenshot)"
+                        result_str = _first_text_line(content)
                         messages.append(make_tool_result_message(
                             tool_call_id=tool_call.id,
                             name=tool_call.name,
@@ -633,11 +545,8 @@ class GUIManager:
                             content=result_str,
                         ))
                     steps += 1
-                    self._notify_step(
-                        tool_call, result_str, steps, elapsed, total, worker_timing,
-                    )
+                    self._notify_step(tool_call, result_str, steps, elapsed, total)
 
-                    # Record step
                     if self.session_store is not None:
                         step_record = GUIStepRecord(
                             tool=tool_call.name,
@@ -663,6 +572,7 @@ class GUIManager:
                         report=termination.report,
                         needs_input=termination.needs_input,
                     )
+                self._collapse_stale_states(messages)
                 self._raise_if_cancel_requested()
                 response = self.client.chat_with_tools(messages, self._tools)
                 self._raise_if_cancel_requested()
@@ -691,6 +601,43 @@ class GUIManager:
                 success=False,
                 summary="Cancelled by user.",
             )
+        finally:
+            self._close_mcp()
+
+    # --- context management ---
+
+    def _collapse_stale_states(self, messages: list[Message]) -> None:
+        """Prune all but the newest K multimodal tool results.
+
+        Screenshots and oversized trees dominate token usage, but text the
+        agent already observed may still matter for read/report tasks, so
+        stale states drop their image and keep text up to a cap instead of
+        being reduced to one line. Only the message that ages out changes
+        each turn, so the already-pruned prefix stays byte-stable for
+        prompt caching.
+        """
+        state_indexes = [
+            i for i, m in enumerate(messages)
+            if m.role == "tool" and isinstance(m.content, list)
+        ]
+        for i in state_indexes[:-self._keep_full_states]:
+            text = "\n".join(
+                part.text for part in messages[i].content
+                if part.type == "text" and part.text
+            )
+            if len(text) > self._stale_text_max_chars:
+                text = text[:self._stale_text_max_chars] + "\n...[text truncated]"
+            messages[i].content = f"{text}\n{_STALE_STUB_SUFFIX}"
+
+    # --- helpers (unchanged loop mechanics) ---
+
+    def _close_mcp(self) -> None:
+        if self._mcp is not None:
+            try:
+                self._mcp.close()
+            except Exception:
+                logger.warning("Failed to close MCP client", exc_info=True)
+            self._mcp = None
 
     def _notify_step(
         self,
@@ -699,7 +646,6 @@ class GUIManager:
         step: int,
         elapsed_sec: float,
         total_elapsed_sec: float,
-        worker_timing: dict[str, float] | None = None,
     ) -> None:
         """Invoke on_step callback, swallowing any exceptions."""
         if self.on_step is None:
@@ -707,7 +653,7 @@ class GUIManager:
         try:
             self.on_step(
                 tool_call, result, step, self.max_steps,
-                elapsed_sec, total_elapsed_sec, worker_timing,
+                elapsed_sec, total_elapsed_sec, None,
             )
         except Exception:
             logger.warning("on_step callback failed for step %d", step)
@@ -741,13 +687,10 @@ class GUIManager:
         )
 
     def _request_situation_report(self, messages: list[Message]) -> str:
-        """One extra LLM call (no tools) to get a situation report on max-steps.
-
-        The LLM has full conversation context and can summarize progress
-        for the caller. Returns empty string on any failure.
-        """
+        """One extra LLM call (no tools) to get a situation report on max-steps."""
         try:
             self._raise_if_cancel_requested()
+            self._collapse_stale_states(messages)
             messages.append(Message(
                 role="user",
                 content=_MAX_STEPS_REPORT_PROMPT,
@@ -783,7 +726,6 @@ class GUIManager:
                 )
             except Exception:
                 logger.warning("Failed to finalize GUI session")
-        capture = self._capture_temp if os.path.isfile(self._capture_temp) else ""
         return GUITaskResult(
             success=success,
             summary=summary,
@@ -792,8 +734,20 @@ class GUIManager:
             session_id=gui_session_id,
             steps_used=steps,
             elapsed_sec=time.monotonic() - task_start,
-            screenshot_path=capture,
+            screenshot_path=self._save_last_screenshot(),
         )
+
+    def _save_last_screenshot(self) -> str:
+        """Persist the newest MCP screenshot so the caller can read it."""
+        if self._last_screenshot is None:
+            return ""
+        try:
+            with open(self._capture_temp, "wb") as f:
+                f.write(base64.b64decode(self._last_screenshot.data))
+            return self._capture_temp
+        except Exception:
+            logger.warning("Failed to save final GUI screenshot", exc_info=True)
+            return ""
 
     def _check_terminal(self, tool_call: ToolCall) -> _LoopTermination | None:
         """Check if a tool call is a termination signal (done/fail/report_problem)."""
@@ -832,183 +786,69 @@ class GUIManager:
             logger.warning("GUI tool %s failed: %s", tool_call.name, e)
             return ToolResult(f"Error: {e}", is_error=True)
 
+    def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str | list[ContentPart]:
+        """Dispatch one tool call to the MCP server, mapping the response."""
+        if self._mcp is None:
+            return "Error: GUI backend is not running."
+        # Drop None args; empty strings are meaningful (e.g. set_value clearing
+        # a field) except for element_index, where "" means "not using index".
+        args = {k: v for k, v in arguments.items() if v is not None}
+        if args.get("element_index") == "":
+            del args["element_index"]
+        if name == "get_app_state":
+            if self._max_tree_nodes is not None:
+                args.setdefault("max_tree_nodes", self._max_tree_nodes)
+            if self._max_tree_depth is not None:
+                args.setdefault("max_tree_depth", self._max_tree_depth)
+        try:
+            text, images, is_error = self._mcp.call_tool(
+                name, args, timeout=self._tool_timeout,
+            )
+        except MCPError as e:
+            return f"Error: {e}"
+        if is_error:
+            return f"Error: {text or 'tool failed'}"
+        if images:
+            self._last_screenshot = images[-1]
+        if not images:
+            return text
+        parts: list[ContentPart] = []
+        if text:
+            parts.append(ContentPart(type="text", text=text))
+        for img in images:
+            parts.append(ContentPart(
+                type="image",
+                media_type=img.mime_type,
+                data=img.data,
+            ))
+        return parts
+
     def _build_registry(self) -> ToolRegistry:
-        """Build internal tool registry (excludes done/fail)."""
+        """Build the internal tool registry (excludes done/fail/report_problem)."""
         registry = ToolRegistry()
 
-        # scan_layout
-        def scan_layout_fn(**kwargs: Any) -> str:
-            try:
-                result = self.worker.scan_layout()
-            except Exception as e:
-                return f"Layout scan error: {e}"
-            return result
+        def _make_mcp_fn(tool_name: str):
+            def mcp_fn(**kwargs: Any) -> str | list[ContentPart]:
+                return self._call_mcp_tool(tool_name, kwargs)
+            return mcp_fn
 
-        registry.register("scan_layout", scan_layout_fn, _SCAN_LAYOUT_DEF)
+        for tool_def in MCP_TOOL_DEFS:
+            registry.register(tool_def.name, _make_mcp_fn(tool_def.name), tool_def)
 
-        # ask_worker
-        def ask_worker_fn(instruction: str = "", **kwargs: Any) -> str:
-            try:
-                obs = self.worker.observe(instruction)
-            except Exception as e:
-                self._last_worker_timing = None
-                return f"Worker error: {e}"
-            self._last_worker_timing = {
-                "screenshot": obs.screenshot_sec,
-                "inference": obs.inference_sec,
-            }
-            parts = [obs.description]
-            if obs.found and obs.bbox:
-                parts.append(f"bbox: {obs.bbox}")
-            elif not obs.found:
-                parts.append("(target NOT found)")
-            if obs.obstructed:
-                parts.append(f"OBSTRUCTED: {obs.obstructed}")
-            if obs.mismatch:
-                parts.append(f"MISMATCH: {obs.mismatch}")
-            return "\n".join(parts)
-
-        registry.register("ask_worker", ask_worker_fn, _ASK_WORKER_DEF)
-
-        # click
-        def click_fn(bbox: list[int] | None = None, **kwargs: Any) -> str:
-            if not bbox or len(bbox) != 4:
-                return "Error: bbox must be [ymin, xmin, ymax, xmax]"
-            try:
-                return click_at_bbox(bbox)
-            except Exception as e:
-                return f"Click error: {e}"
-
-        registry.register("click", click_fn, _CLICK_DEF)
-
-        # right_click
-        def right_click_fn(bbox: list[int] | None = None, **kwargs: Any) -> str:
-            if not bbox or len(bbox) != 4:
-                return "Error: bbox must be [ymin, xmin, ymax, xmax]"
-            try:
-                return right_click_at_bbox(bbox)
-            except Exception as e:
-                return f"Right-click error: {e}"
-
-        registry.register("right_click", right_click_fn, _RIGHT_CLICK_DEF)
-
-        # scroll
-        def scroll_fn(
-            bbox: list[int] | None = None,
-            direction: str = "down",
-            **kwargs: Any,
-        ) -> str:
-            if not bbox or len(bbox) != 4:
-                return "Error: bbox must be [ymin, xmin, ymax, xmax]"
-            if direction not in ("up", "down"):
-                return "Error: direction must be 'up' or 'down'"
-            try:
-                return scroll_at_bbox(
-                    bbox, direction, self._scroll_max_amount,
-                    invert=self._scroll_invert,
-                )
-            except Exception as e:
-                return f"Scroll error: {e}"
-
-        registry.register("scroll", scroll_fn, _SCROLL_DEF)
-
-        # drag
-        def drag_fn(
-            from_bbox: list[int] | None = None,
-            to_bbox: list[int] | None = None,
-            duration: float = 0.5,
-            **kwargs: Any,
-        ) -> str:
-            if not from_bbox or len(from_bbox) != 4:
-                return "Error: from_bbox must be [ymin, xmin, ymax, xmax]"
-            if not to_bbox or len(to_bbox) != 4:
-                return "Error: to_bbox must be [ymin, xmin, ymax, xmax]"
-            try:
-                return drag_between_bboxes(from_bbox, to_bbox, duration)
-            except Exception as e:
-                return f"Drag error: {e}"
-
-        registry.register("drag", drag_fn, _DRAG_DEF)
-
-        # maximize_window
-        def maximize_window_fn(app_name: str = "", **kwargs: Any) -> str:
-            if not app_name:
-                return "Error: app_name is required"
-            try:
-                return maximize_window(app_name)
-            except Exception as e:
-                return f"Maximize error: {e}"
-
-        registry.register("maximize_window", maximize_window_fn, _MAXIMIZE_WINDOW_DEF)
-
-        # type_text
-        def type_text_fn(text: str = "", **kwargs: Any) -> str:
-            if not text:
-                return "Error: text is required"
-            try:
-                return type_text(text)
-            except Exception as e:
-                return f"Type error: {e}"
-
-        registry.register("type_text", type_text_fn, _TYPE_TEXT_DEF)
-
-        # key_press
-        def key_press_fn(key: str = "", **kwargs: Any) -> str:
-            if not key:
-                return "Error: key is required"
-            try:
-                return press_key(key)
-            except Exception as e:
-                return f"Key press error: {e}"
-
-        registry.register("key_press", key_press_fn, _KEY_PRESS_DEF)
-
-        # screenshot (multimodal return) -- only when direct viewing is enabled
-        if self._allow_direct_screenshot:
-            def screenshot_fn(**kwargs: Any) -> list[ContentPart]:
-                ss = take_screenshot(
-                    max_width=self._screenshot_max_width,
-                    quality=self._screenshot_quality,
-                )
-                return [ss, ContentPart(type="text", text="Screenshot taken.")]
-
-            registry.register("screenshot", screenshot_fn, _SCREENSHOT_DEF)
-
-        # capture_screenshot
-        def capture_screenshot_fn(**kwargs: Any) -> str:
-            return capture_screenshot_to_temp(self._capture_temp)
-
-        registry.register("capture_screenshot", capture_screenshot_fn, _CAPTURE_SCREENSHOT_DEF)
-
-        # paste_screenshot
-        def paste_screenshot_fn(**kwargs: Any) -> str:
-            return paste_screenshot_from_temp(self._capture_temp)
-
-        registry.register("paste_screenshot", paste_screenshot_fn, _PASTE_SCREENSHOT_DEF)
-
-        # activate_app
-        def activate_app_fn(name: str = "", **kwargs: Any) -> str:
-            if not name:
-                return "Error: name is required"
-            try:
-                return activate_app(name)
-            except Exception as e:
-                return f"Error: {e}"
-
-        registry.register("activate_app", activate_app_fn, _ACTIVATE_APP_DEF)
-
-        # get_active_app
-        def get_active_app_fn(**kwargs: Any) -> str:
-            return get_active_app()
-
-        registry.register("get_active_app", get_active_app_fn, _GET_ACTIVE_APP_DEF)
-
-        # wait
         def wait_fn(seconds: float = 1.0, **kwargs: Any) -> str:
             seconds = min(max(seconds, 0.1), 10.0)
             self._sleep_with_cancel(seconds)
             return f"Waited {seconds:.1f}s"
 
         registry.register("wait", wait_fn, _WAIT_DEF)
-
         return registry
+
+
+def _first_text_line(parts: list[ContentPart] | str) -> str:
+    """First text line of a multimodal tool result, for logs and stubs."""
+    if isinstance(parts, str):
+        return parts.splitlines()[0] if parts else ""
+    for part in parts:
+        if part.type == "text" and part.text:
+            return part.text.splitlines()[0]
+    return "(image)"

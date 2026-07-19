@@ -32,6 +32,7 @@
 | [agent-task-system.md](agent-task-system.md) | Agent Task System：結構化待辦 + 排程重複 + heartbeat 注入 |
 | [macos-app-tools.md](macos-app-tools.md) | macOS 原生個人資料工具：Calendar / Reminders / Notes / Photos 的 tool 設計與使用規則 |
 | [web-dashboard.md](web-dashboard.md) | Web Dashboard：chat_web_api + chat_web_ui 架構、API、前端設計、注意事項 |
+| [gui-computer-use.md](gui-computer-use.md) | GUI Computer Use：AX-first 架構、MCP server vendor 規範、context 管理策略 |
 
 ## 子資料夾
 

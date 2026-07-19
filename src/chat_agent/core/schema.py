@@ -1165,6 +1165,23 @@ class CacheConfig(StrictConfigModel):
     )
 
 
+class AXServerConfig(StrictConfigModel):
+    """OpenComputerUse MCP server settings for the AX-first GUI loop.
+
+    repo/commit/binary_path default to the pinned values in
+    chat_agent.gui.ax_runtime; set them only to override the vendored build.
+    """
+
+    repo: str | None = None
+    commit: str | None = None
+    binary_path: str | None = None
+    keep_full_states: int = Field(default=2, ge=1)
+    stale_text_max_chars: int = Field(default=2000, ge=200)
+    max_tree_nodes: int | None = Field(default=None, ge=10)
+    max_tree_depth: int | None = Field(default=None, ge=2)
+    tool_timeout: float = Field(default=90.0, gt=0)
+
+
 class AgentConfig(StrictConfigModel):
     """Agent configuration with LLM settings."""
 
@@ -1195,7 +1212,8 @@ class AgentConfig(StrictConfigModel):
     # GUI screenshot optimization
     screenshot_max_width: int | None = Field(default=1280, ge=256)
     screenshot_quality: int = Field(default=80, ge=10, le=100)
-    allow_direct_screenshot: bool = False
+    # AX-first GUI backend (gui_manager only)
+    ax: AXServerConfig = Field(default_factory=AXServerConfig)
     # Vision delegation: when False, delegate image reading to vision sub-agent
     use_own_vision_ability: bool = False
     # Worker subagent specific

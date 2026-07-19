@@ -1,9 +1,12 @@
 """GUI desktop automation module.
 
-Three-layer architecture:
+AX-first architecture:
 - Brain calls gui_task (tool_adapter.py)
-- GUIManager runs agentic tool loop (manager.py)
-- GUIWorker does single-shot screenshot analysis (worker.py)
+- GUIManager runs an agentic loop over the OpenComputerUse MCP server
+  (accessibility tree + screenshot + background input) and sees tool
+  results directly (manager.py, mcp_client.py, ax_runtime.py)
+- GUIWorker remains only as the vision describer behind
+  screenshot_by_subagent (worker.py)
 """
 
 from .manager import GUIManager, GUIStepCallback, GUITaskResult

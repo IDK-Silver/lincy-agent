@@ -59,6 +59,14 @@ processes:
     shutdown_timeout: 60
     log_output: true
 
+  ax-server-build:
+    enabled: true
+    command: ["uv", "run", "python", "-m", "chat_agent.gui.ax_runtime"]
+    cwd: "."
+    auto_restart: false # oneshot: build/cache OpenComputerUse if missing
+    shutdown_timeout: 600 # first build takes minutes; cached runs are instant
+    log_output: true
+
   chat-web-api:
     enabled: true
     command: ["uv", "run", "chat-web-api", "serve"]
@@ -78,7 +86,7 @@ processes:
     shutdown_timeout: 1200
     auto_restart: true
     join_restart_cycle: true
-    depends_on: ["copilot-proxy", "codex-proxy", "claude-code-proxy", "grok-proxy", "chat-web-api"]
+    depends_on: ["copilot-proxy", "codex-proxy", "claude-code-proxy", "grok-proxy", "chat-web-api", "ax-server-build"]
     log_output: false
     start_new_session: false
 
