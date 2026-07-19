@@ -1176,6 +1176,7 @@ class AXServerConfig(StrictConfigModel):
     commit: str | None = None
     binary_path: str | None = None
     keep_full_states: int = Field(default=2, ge=1)
+    stale_text_max_chars: int = Field(default=2000, ge=200)
     max_tree_nodes: int | None = Field(default=None, ge=10)
     max_tree_depth: int | None = Field(default=None, ge=2)
     tool_timeout: float = Field(default=90.0, gt=0)

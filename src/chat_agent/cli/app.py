@@ -738,6 +738,7 @@ def main(user: str, resume: str | None = None) -> None:
                 step_delay_min=gm_config.step_delay_min,
                 step_delay_max=gm_config.step_delay_max,
                 keep_full_states=gm_config.ax.keep_full_states,
+                stale_text_max_chars=gm_config.ax.stale_text_max_chars,
                 max_tree_nodes=gm_config.ax.max_tree_nodes,
                 max_tree_depth=gm_config.ax.max_tree_depth,
                 tool_timeout=gm_config.ax.tool_timeout,

@@ -41,7 +41,10 @@ logger = logging.getLogger(__name__)
 _MAX_STEPS = 20
 _WAIT_CANCEL_POLL_SECONDS = 0.1
 _DEFAULT_TOOL_TIMEOUT = 90.0
-_STALE_STUB_SUFFIX = "[stale app state pruned; call get_app_state for fresh state]"
+_STALE_STUB_SUFFIX = (
+    "[stale state: screenshot removed; element indexes no longer valid; "
+    "call get_app_state for fresh state]"
+)
 
 _MAX_STEPS_REPORT_PROMPT = (
     "You have reached the step limit. No tools are available. "
@@ -102,9 +105,11 @@ _GET_APP_STATE_DEF = ToolDefinition(
         "text_limit": ToolParameter(
             type="integer",
             description=(
-                "Optional cap on characters per text value in the tree. "
+                "Optional cap on characters per text value in the tree: a "
+                "positive integer, or the string \"max\" for untruncated text. "
                 "Raise it when you need to read long visible text in full."
             ),
+            json_schema={"type": ["integer", "string"]},
         ),
     },
     required=["app"],
@@ -380,6 +385,7 @@ class GUIManager:
         step_delay_min: float = 0.0,
         step_delay_max: float = 0.0,
         keep_full_states: int = 2,
+        stale_text_max_chars: int = 2000,
         max_tree_nodes: int | None = None,
         max_tree_depth: int | None = None,
         tool_timeout: float = _DEFAULT_TOOL_TIMEOUT,
@@ -395,6 +401,7 @@ class GUIManager:
         self._step_delay_min = step_delay_min
         self._step_delay_max = max(step_delay_max, step_delay_min)
         self._keep_full_states = max(keep_full_states, 1)
+        self._stale_text_max_chars = max(stale_text_max_chars, 200)
         self._max_tree_nodes = max_tree_nodes
         self._max_tree_depth = max_tree_depth
         self._tool_timeout = tool_timeout
@@ -602,18 +609,25 @@ class GUIManager:
     def _collapse_stale_states(self, messages: list[Message]) -> None:
         """Prune all but the newest K multimodal tool results.
 
-        App states (tree + screenshot) dominate token usage; stale ones
-        carry no information the latest state does not supersede. Only the
-        message that ages out changes each turn, so the already-pruned
-        prefix stays byte-stable for prompt caching.
+        Screenshots and oversized trees dominate token usage, but text the
+        agent already observed may still matter for read/report tasks, so
+        stale states drop their image and keep text up to a cap instead of
+        being reduced to one line. Only the message that ages out changes
+        each turn, so the already-pruned prefix stays byte-stable for
+        prompt caching.
         """
         state_indexes = [
             i for i, m in enumerate(messages)
             if m.role == "tool" and isinstance(m.content, list)
         ]
         for i in state_indexes[:-self._keep_full_states]:
-            first_line = _first_text_line(messages[i].content)
-            messages[i].content = f"{first_line}\n{_STALE_STUB_SUFFIX}"
+            text = "\n".join(
+                part.text for part in messages[i].content
+                if part.type == "text" and part.text
+            )
+            if len(text) > self._stale_text_max_chars:
+                text = text[:self._stale_text_max_chars] + "\n...[text truncated]"
+            messages[i].content = f"{text}\n{_STALE_STUB_SUFFIX}"
 
     # --- helpers (unchanged loop mechanics) ---
 

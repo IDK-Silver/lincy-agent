@@ -369,6 +369,7 @@ agents:
     ax: # AX-first 後端（OpenComputerUse MCP server）
       # repo/commit/binary_path 不設定時使用 gui/ax_runtime.py 內的 pin 值
       keep_full_states: 2 # loop 內保留完整 tree+截圖 的最近步數，其餘折疊
+      stale_text_max_chars: 2000 # 折疊後每份舊狀態保留的文字上限（去圖、截文）
       max_tree_nodes: null # 單次 get_app_state 的 tree 節點上限（null = server 預設）
       max_tree_depth: null # tree 深度上限（null = server 預設）
       tool_timeout: 90 # 單一 MCP 工具呼叫逾時（秒）

@@ -326,10 +326,34 @@ class TestStaleStateCollapse:
         tool_msgs = [m for m in messages if m.role == "tool"]
         assert isinstance(tool_msgs[0].content, str)
         assert tool_msgs[0].content.startswith("App state 0")
+        # Observed text survives pruning; only the screenshot is dropped.
+        assert "line2" in tool_msgs[0].content
         assert _STALE_STUB_SUFFIX in tool_msgs[0].content
         assert isinstance(tool_msgs[1].content, str)
         assert isinstance(tool_msgs[2].content, list)
         assert isinstance(tool_msgs[3].content, list)
+
+    def test_stale_text_is_capped(self):
+        client = FakeManagerClient([])
+        manager, _ = make_manager(
+            client, keep_full_states=1, stale_text_max_chars=200,
+        )
+        long_text = "x" * 5000
+        messages = [
+            Message(
+                role="tool", tool_call_id="1", name="get_app_state",
+                content=[ContentPart(type="text", text=long_text)],
+            ),
+            Message(
+                role="tool", tool_call_id="2", name="get_app_state",
+                content=[ContentPart(type="text", text="fresh")],
+            ),
+        ]
+        manager._collapse_stale_states(messages)
+        pruned = messages[0].content
+        assert isinstance(pruned, str)
+        assert len(pruned) < 400
+        assert "[text truncated]" in pruned
 
     def test_collapse_runs_between_llm_turns(self):
         mcp = FakeMCP(results={
