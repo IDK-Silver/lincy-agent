@@ -49,6 +49,57 @@ GET_CHANNEL_HISTORY_DEFINITION = ToolDefinition(
 )
 
 
+def _registered_entries(history_store: "DiscordHistoryStore") -> list[dict]:
+    return [e for e in history_store.list_registered_channels() if isinstance(e, dict)]
+
+
+def _resolve_contact_channel_id(
+    history_store: "DiscordHistoryStore",
+    contact_map: "ContactMap",
+    to: str,
+) -> str | None:
+    """Resolve a contact alias to a registered channel id.
+
+    Contact-map entries can chain (display name -> username -> user id), so a
+    single reverse lookup may land mid-chain on a value that is neither a
+    channel id nor a user id. Walk the chain and match every hop against the
+    registry: exact channel id first, then channel alias, then DM peer user id.
+    """
+    candidates = [to]
+    seen = {to}
+    cur: str | None = to
+    while cur is not None:
+        cur = contact_map.reverse_lookup("discord", cur)
+        if cur is None or cur in seen:
+            break
+        candidates.append(cur)
+        seen.add(cur)
+
+    entries = _registered_entries(history_store)
+    for cand in candidates:
+        if history_store.get_channel_entry(cand) is not None:
+            return cand
+        for entry in entries:
+            if cand in (
+                str(entry.get("alias") or ""),
+                str(entry.get("dm_peer_user_id") or ""),
+            ):
+                channel_id = str(entry.get("channel_id") or "").strip()
+                if channel_id:
+                    return channel_id
+    return None
+
+
+def _known_aliases(history_store: "DiscordHistoryStore", cap: int = 20) -> str:
+    aliases = sorted(
+        {str(e.get("alias") or "").strip() for e in _registered_entries(history_store)}
+        - {""}
+    )
+    if len(aliases) > cap:
+        aliases = aliases[:cap] + ["..."]
+    return ", ".join(aliases)
+
+
 def create_get_channel_history(
     history_store: "DiscordHistoryStore",
     contact_map: "ContactMap",
@@ -69,23 +120,15 @@ def create_get_channel_history(
         target = to
         resolved_channel_id = channel_id
         if resolved_channel_id is None and to:
-            resolved = contact_map.reverse_lookup("discord", to)
-            if resolved is not None:
-                resolved_channel_id = resolved
-                # Person aliases resolve to Discord user IDs. For history lookup we need the DM channel ID.
-                if history_store.get_channel_entry(resolved_channel_id) is None:
-                    for entry in history_store.list_registered_channels():
-                        if not isinstance(entry, dict):
-                            continue
-                        if str(entry.get("dm_peer_user_id") or "") == resolved_channel_id:
-                            candidate = str(entry.get("channel_id") or "").strip()
-                            if candidate:
-                                resolved_channel_id = candidate
-                                break
+            resolved_channel_id = _resolve_contact_channel_id(
+                history_store, contact_map, to
+            )
             if resolved_channel_id is None:
+                known = _known_aliases(history_store)
+                hint = f" Known targets: {known}." if known else ""
                 return (
-                    f"Error: no discord channel/contact mapping found for '{to}'. "
-                    "Use a known alias or provide channel_id."
+                    f"Error: no discord channel/contact mapping found for '{to}'."
+                    f"{hint} Use a known alias or provide channel_id."
                 )
         if resolved_channel_id is None:
             if (
@@ -115,6 +158,19 @@ def create_get_channel_history(
                 return "Error: since_minutes must be an integer"
             if since_i < 0:
                 return "Error: since_minutes must be >= 0"
+
+        # Fail loudly on unknown channels: a silent empty result reads as
+        # "no recent messages" and hides resolution bugs from the model.
+        if (
+            history_store.get_channel_entry(resolved_channel_id) is None
+            and not history_store.read_events(resolved_channel_id)
+        ):
+            known = _known_aliases(history_store)
+            hint = f" Known targets: {known}." if known else ""
+            return (
+                f"Error: no discord history recorded for channel id "
+                f"'{resolved_channel_id}'.{hint}"
+            )
 
         payload = history_store.get_channel_history(
             resolved_channel_id,

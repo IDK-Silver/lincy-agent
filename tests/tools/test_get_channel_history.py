@@ -121,6 +121,69 @@ class TestGetChannelHistory:
         assert payload["count"] == 1
         assert payload["messages"][0]["content"] == "dm hello"
 
+    def test_dm_display_name_resolves_via_alias_chain(self, tmp_path):
+        # Production contact maps chain user id -> username -> display name
+        # (plus a display-name self mapping); reverse lookup of the display
+        # name lands on the username, which must still reach the DM channel.
+        fn, history, contact_map, _ = _make_tool(tmp_path)
+        contact_map.update("discord", "user-540", "silver")
+        contact_map.update("discord", "silver", "Yufeng")
+        contact_map.update("discord", "Yufeng", "Yufeng")
+        history.upsert_channel(
+            channel_id="dm-chan-540",
+            guild_id=None,
+            guild_name=None,
+            channel_name="dm",
+            alias="silver",
+            filter_mode="all",
+            source="dm",
+            extra={"dm_peer_user_id": "user-540"},
+        )
+        history.append_message_create(
+            channel_id="dm-chan-540",
+            event={
+                "event_time": "2026-02-24T10:00:00+00:00",
+                "message_id": "m1",
+                "message_time": "2026-02-24T10:00:00+00:00",
+                "author_id": "user-540",
+                "author_name": "silver",
+                "author_display_name": "Yufeng",
+                "raw_content": "chain hello",
+                "embeds": [],
+                "stickers": [],
+                "attachments": [],
+                "normalized_text": "chain hello",
+            },
+        )
+
+        payload = json.loads(fn(channel="discord", to="Yufeng"))
+        assert payload["channel_id"] == "dm-chan-540"
+        assert payload["count"] == 1
+        assert payload["messages"][0]["content"] == "chain hello"
+
+    def test_unknown_alias_error_lists_known_targets(self, tmp_path):
+        fn, history, _, _ = _make_tool(tmp_path)
+        history.upsert_channel(
+            channel_id="dm-chan-1",
+            guild_id=None,
+            guild_name=None,
+            channel_name="dm",
+            alias="silver",
+            filter_mode="all",
+            source="dm",
+            extra={"dm_peer_user_id": "user-1"},
+        )
+
+        result = fn(channel="discord", to="nobody")
+        assert "Error" in result
+        assert "silver" in result
+
+    def test_unregistered_channel_id_errors_instead_of_empty(self, tmp_path):
+        fn, _, _, _ = _make_tool(tmp_path)
+        result = fn(channel="discord", channel_id="ghost-channel")
+        assert "Error" in result
+        assert "ghost-channel" in result
+
     def test_folds_edit_to_latest_with_flag(self, tmp_path):
         fn, history, _, _ = _make_tool(tmp_path)
         base = {
