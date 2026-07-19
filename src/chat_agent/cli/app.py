@@ -681,6 +681,70 @@ def main(user: str, resume: str | None = None) -> None:
                 cache_namespace="gui_manager",
             ),
         )
+        from ..gui.ax_runtime import AXRuntimeError, ensure_binary
+        from ..gui.mcp_client import MCPStdioClient
+
+        try:
+            gm_prompt = workspace.get_system_prompt("gui_manager")
+        except FileNotFoundError:
+            gm_prompt = ""
+        ax_binary: str | None = None
+        if gm_prompt:
+            try:
+                ax_binary = ensure_binary(
+                    **{
+                        k: v
+                        for k, v in {
+                            "repo": gm_config.ax.repo,
+                            "commit": gm_config.ax.commit,
+                        }.items()
+                        if v
+                    },
+                    override_path=gm_config.ax.binary_path,
+                )
+            except AXRuntimeError as e:
+                logger.error("GUI disabled, AX backend unavailable: %s", e)
+        if gm_prompt and ax_binary:
+            gui_session_store = GUISessionStore(agent_os_dir / "session" / "gui")
+
+            def _gui_step_callback(
+                tool_call, result, step, max_steps,
+                elapsed_sec, total_elapsed_sec, worker_timing,
+            ):
+                console.print_gui_step(
+                    tool_call, result, step, max_steps,
+                    elapsed_sec, total_elapsed_sec,
+                    worker_timing=worker_timing,
+                    instruction_max_chars=gm_config.gui_instruction_max_chars,
+                    text_max_chars=gm_config.gui_text_max_chars,
+                    worker_result_max_chars=gm_config.gui_worker_result_max_chars,
+                    result_max_chars=gm_config.gui_result_max_chars,
+                )
+
+            console.gui_intent_max_chars = gm_config.gui_intent_max_chars
+            _ax_bin = ax_binary
+            _ax_timeout = gm_config.ax.tool_timeout
+            gui_manager_instance = GUIManager(
+                gm_client,
+                mcp_factory=lambda: MCPStdioClient(
+                    [_ax_bin, "mcp"], timeout=_ax_timeout,
+                ),
+                system_prompt=gm_prompt,
+                max_steps=gm_config.max_steps,
+                session_store=gui_session_store,
+                on_step=_gui_step_callback,
+                is_cancel_requested=cancel_controller.is_requested,
+                allow_wait_tool=gm_config.allow_wait_tool,
+                step_delay_min=gm_config.step_delay_min,
+                step_delay_max=gm_config.step_delay_max,
+                keep_full_states=gm_config.ax.keep_full_states,
+                max_tree_nodes=gm_config.ax.max_tree_nodes,
+                max_tree_depth=gm_config.ax.max_tree_depth,
+                tool_timeout=gm_config.ax.tool_timeout,
+            )
+
+        # Vision worker survives only as the describer behind
+        # screenshot_by_subagent; the manager loop no longer uses it.
         gw_config = config.agents.get("gui_worker")
         if gw_config and gw_config.enabled:
             gw_client = create_agent_client(
@@ -694,7 +758,6 @@ def main(user: str, resume: str | None = None) -> None:
                 ),
             )
             try:
-                gm_prompt = workspace.get_system_prompt("gui_manager")
                 gw_prompt = workspace.get_system_prompt("gui_worker")
                 gw_layout_prompt = workspace.get_agent_prompt("gui_worker", "layout")
                 gw_describe_prompt = ""
@@ -702,45 +765,12 @@ def main(user: str, resume: str | None = None) -> None:
                     gw_describe_prompt = workspace.get_agent_prompt("gui_worker", "describe")
                 except FileNotFoundError:
                     pass
-                worker = GUIWorker(
+                gui_worker_instance = GUIWorker(
                     gw_client, gw_prompt,
                     screenshot_max_width=gm_config.screenshot_max_width,
                     screenshot_quality=gm_config.screenshot_quality,
                     layout_prompt=gw_layout_prompt,
                     describe_prompt=gw_describe_prompt,
-                )
-                gui_worker_instance = worker
-                gui_session_store = GUISessionStore(agent_os_dir / "session" / "gui")
-
-                def _gui_step_callback(
-                    tool_call, result, step, max_steps,
-                    elapsed_sec, total_elapsed_sec, worker_timing,
-                ):
-                    console.print_gui_step(
-                        tool_call, result, step, max_steps,
-                        elapsed_sec, total_elapsed_sec,
-                        worker_timing=worker_timing,
-                        instruction_max_chars=gm_config.gui_instruction_max_chars,
-                        text_max_chars=gm_config.gui_text_max_chars,
-                        worker_result_max_chars=gm_config.gui_worker_result_max_chars,
-                        result_max_chars=gm_config.gui_result_max_chars,
-                    )
-
-                console.gui_intent_max_chars = gm_config.gui_intent_max_chars
-                gui_manager_instance = GUIManager(
-                    gm_client, worker, gm_prompt,
-                    max_steps=gm_config.max_steps,
-                    session_store=gui_session_store,
-                    on_step=_gui_step_callback,
-                    screenshot_max_width=gm_config.screenshot_max_width,
-                    screenshot_quality=gm_config.screenshot_quality,
-                    scroll_invert=config.tools.scroll.invert,
-                    scroll_max_amount=config.tools.scroll.max_amount,
-                    is_cancel_requested=cancel_controller.is_requested,
-                    allow_direct_screenshot=gm_config.allow_direct_screenshot,
-                    allow_wait_tool=gm_config.allow_wait_tool,
-                    step_delay_min=gm_config.step_delay_min,
-                    step_delay_max=gm_config.step_delay_max,
                 )
             except FileNotFoundError:
                 pass

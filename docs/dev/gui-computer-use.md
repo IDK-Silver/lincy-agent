@@ -1,0 +1,80 @@
+# GUI Computer Use（AX-first 架構）
+
+本文件定義 GUI 任務子系統的架構、context 管理策略與 vendor 規範。2026-07 起取代舊的「視覺 worker 猜座標」範式。
+
+## 背景與動機
+
+舊架構（三層）：brain → `gui_task` → GUIManager（全盲，靠文字轉述）→ GUIWorker（Gemini 視覺，截圖給 bbox）→ pyautogui 前景點擊。弱點不在視覺模型的指位準度（實測 opus 4.8 / gpt-5.5 / gemini flash 指位全數命中），而在架構本身：
+
+- manager 看不到畫面，靠 worker 文字二手轉述
+- 每步重新視覺搜尋元素，無語義結構、看不到捲軸外內容
+- pyautogui 佔用真實游標、剪貼簿（`type_text` 走 pbcopy+Cmd+V）與前景焦點
+
+新架構仿照官方 Codex computer use（AX-first）：以 accessibility tree 為主要觀察與定位手段、截圖為輔、事件走背景投遞（`CGEventPostToPid` 定向到目標 app，不動真游標）。本機驗證：opus 4.8 當 brain 的端到端任務 3/3 成功（計算機運算、TextEdit 建檔打字含 discard 對話框、系統設定跨 pane 導航查值，含 app 中途重啟與 tool error 的自主恢復）。
+
+## 架構
+
+```
+brain --gui_task--> GUIManager (opus 4.8, AX-first CU loop)
+                       |-- MCP stdio --> OpenComputerUse server (Swift, 本地)
+                       |                   AX tree + 視窗截圖 + 背景輸入
+                       `-- 本地工具: wait / done / fail / report_problem
+
+brain --screenshot_by_subagent--> GUIWorker (Gemini 視覺describe，僅此用途)
+```
+
+- **兩層不變**：CU loop 隔離在 `gui_task` 子 loop，不把 9 個 AX 工具掛到 brain。理由：每步 tree+截圖是高流量暫時性 context，掛 brain 會炸 `soft_max_prompt_tokens`、破壞 brain cache 準則，且做完後殘留對話歷史。
+- **manager 直接看圖**：tool result 內含截圖（claude_code provider 支援 tool result image parts），不再有視覺轉述層。
+- **gui_worker 僅存於** `screenshot_by_subagent`；GUI 任務 loop 不再依賴。
+- `gui_task` 對 brain 的介面（intent / session_id / app_prompt、背景執行、GUI lock）完全不變。
+
+## 工具面（9 MCP + 4 本地）
+
+MCP 工具全帶 `app` 參數（英文名或 bundle id；本地化名稱解析不到）：
+`list_apps`、`get_app_state`、`click`（element_index 或 x/y fallback、右鍵、雙擊）、`drag`、`scroll`、`type_text`、`press_key`、`set_value`、`perform_secondary_action`。
+
+本地工具：`wait`（可用 `allow_wait_tool` 關閉）、`done`、`fail`、`report_problem`（terminal 語義與舊版相同）。
+
+工具定義為靜態（`gui/manager.py` 的 `MCP_TOOL_DEFS`），與 pin 的 server schema 對齊；升級 pin commit 時須核對 schema。
+
+### 關鍵行為（實測）
+
+- **Element index 會隨 UI 變化重排**，只對最新快照有效。動作工具會自帶回新狀態，prompt 已要求逐步重新定位、禁止跨快照批次點擊。
+- `get_app_state` 0.2-0.8s/次；未執行的 app 會自動啟動。
+- 樹品質分四級（2026-07 本機實測）：原生 app 優（Calculator 每鍵有穩定 ID、顯示值可直讀）；Electron/Gecko 極佳（Obsidian 757 元素、Firefox 654）；Qt 結構在內容盲（LINE 33 元素，rows 無標籤但列表可捲、composer settable）——用「截圖認位置、index 點擊、set_value 輸入」混合模式；自繪 GPU UI 荒漠（Zed 14 元素）——只能座標 fallback，精度不足時 report_problem。
+
+## Context 管理（CU loop 內）
+
+每步 tree（0.7k-27k chars）+ 截圖若全量保留，14 步任務累計計費 input 可達 350k tokens（無 cache 裸跑實測值）。策略：
+
+1. **舊快照折疊**：`_collapse_stale_states()` 只保留最近 `keep_full_states`（預設 2）份完整多模態 tool result，更舊的折疊成單行 stub。每輪只有「剛過期的那一份」變動，已折疊前綴保持 byte-stable，對 prompt cache 友善。
+2. **樹上限**：`ax.max_tree_nodes` / `ax.max_tree_depth` 傳入 `get_app_state`（預設 null = server 預設）。
+3. Prompt cache 沿用 gui_manager 的 cache 設定（claude_code provider）。
+
+## Vendor 與供應鏈
+
+- 來源：[iFurySt/open-codex-computer-use](https://github.com/iFurySt/open-codex-computer-use)（MIT），**pin commit** 於 `gui/ax_runtime.py` 的 `DEFAULT_COMMIT`。
+- 建置：`chat-supervisor start` 的 `ax-server-build` oneshot（`python -m chat_agent.gui.ax_runtime`）→ shallow fetch pin commit（`GIT_LFS_SKIP_SMUDGE=1`，upstream LFS 額度已爆且 LFS 物件僅為逆向資產）→ `swift build -c release` → 快取到 `~/.cache/chat_agent/ocu/<commit12>/`。已快取則秒過。cli 組裝時也會 `ensure_binary()` 兜底。
+- 稽核（pin commit 當下）：Kit 與主程式零網路 API（無 URLSession/socket）、零外部 Swift 依賴。升級 pin 時重跑此稽核。
+- 前置需求：swift toolchain（缺失時 oneshot 早停並給出安裝指令）、Accessibility + Screen Recording 權限（授予宿主進程；`OpenComputerUse doctor` 可檢查）。**重編譯/更新 binary 後 TCC 權限可能要重新授予**。
+- 設定覆寫：`gui_manager.ax.repo/commit/binary_path`（預設 null = 用 pin 值）。
+
+## 設定（cfgs/agent.yaml）
+
+```yaml
+gui_manager:
+  ax:
+    keep_full_states: 2
+    max_tree_nodes: null
+    max_tree_depth: null
+    tool_timeout: 90
+```
+
+已移除：`allow_direct_screenshot`（manager 恆為直接看圖）。`gui_worker` 段保留（screenshot_by_subagent 用）。
+
+## 已知限制與後續
+
+- LINE 混合模式尚未跑過真實聊天任務回歸（建議用測試帳號驗證後再開放 LINE 相關 skill）。
+- 舊 `actions.py` 保留：`activate_app`（resume 重啟 app）、`take_screenshot`（brain 的 `screenshot` 工具）、其餘座標函式已無 caller，待清理。
+- server 端虛擬游標動畫使單次 click ~2s，可研究 server 設定調速。
+- GUI session resume 格式沿用；舊 session 的步驟紀錄（ask_worker/bbox 工具名）對新 loop 僅為歷史文字，無相容問題。

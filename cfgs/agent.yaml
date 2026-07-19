@@ -364,10 +364,17 @@ agents:
     gui_text_max_chars: null # type_text 文字顯示截斷（null=不截斷）
     gui_worker_result_max_chars: null # worker 觀察結果顯示截斷（null=不截斷）
     gui_result_max_chars: null # 一般結果顯示截斷（null=不截斷）
-    screenshot_max_width: 1000 # 截圖最大寬度（等比縮放）
+    screenshot_max_width: 1000 # 截圖最大寬度（等比縮放；供 brain screenshot 工具與 gui_worker 用）
     screenshot_quality: 70 # JPEG 壓縮品質（1-100）
-    allow_direct_screenshot: false # true = manager LLM 可直接看截圖
+    ax: # AX-first 後端（OpenComputerUse MCP server）
+      # repo/commit/binary_path 不設定時使用 gui/ax_runtime.py 內的 pin 值
+      keep_full_states: 2 # loop 內保留完整 tree+截圖 的最近步數，其餘折疊
+      max_tree_nodes: null # 單次 get_app_state 的 tree 節點上限（null = server 預設）
+      max_tree_depth: null # tree 深度上限（null = server 預設）
+      tool_timeout: 90 # 單一 MCP 工具呼叫逾時（秒）
 
+  # gui_worker 僅供 brain 的 screenshot_by_subagent 使用；
+  # GUI 任務 loop（gui_manager）已改為 AX-first，不再依賴 worker
   gui_worker:
     enabled: true
     llm: cfgs/llm/openrouter/google-gemini-3-flash-preview/no-thinking.yaml
