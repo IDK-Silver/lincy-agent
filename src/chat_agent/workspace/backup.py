@@ -5,7 +5,14 @@ import shutil
 from ..timezone_utils import now as tz_now
 from pathlib import Path
 
-# Directories to skip during backup (reproducible / contain broken symlinks)
+# Upgrade-managed directories: everything migrations and the upgrade flow
+# write to. All small text content. Runtime bulk (state/ media, cache/,
+# session/, logs/) is deliberately NOT backed up: copying it is slow, grows
+# without bound, and on iCloud-resident workspaces reading dataless media
+# files blocks the whole upgrade on on-demand downloads.
+_BACKUP_DIRS = {"kernel", "memory", "personal-skills"}
+
+# Directories to skip inside backed-up trees (reproducible content)
 _SKIP_DIRS = {"backups", ".venv", "__pycache__", "node_modules"}
 
 
@@ -13,14 +20,14 @@ _ignore_skip_dirs = shutil.ignore_patterns(*_SKIP_DIRS)
 
 
 class WorkspaceBackup:
-    """Creates full workspace backups before kernel upgrades."""
+    """Backs up upgrade-managed workspace dirs before kernel upgrades."""
 
     def __init__(self, agent_os_dir: Path):
         self.agent_os_dir = agent_os_dir
         self.backups_dir = agent_os_dir / "backups"
 
     def create_backup(self, current_version: str) -> Path:
-        """Backup the entire workspace (excluding backups/ itself).
+        """Backup kernel/, memory/ and personal-skills/.
 
         Args:
             current_version: Kernel version being backed up.
@@ -34,15 +41,11 @@ class WorkspaceBackup:
 
         self.backups_dir.mkdir(parents=True, exist_ok=True)
 
-        for item in self.agent_os_dir.iterdir():
-            if item.name in _SKIP_DIRS:
+        for name in sorted(_BACKUP_DIRS):
+            item = self.agent_os_dir / name
+            if not item.is_dir():
                 continue
-            dest = backup_path / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest, ignore=_ignore_skip_dirs)
-            else:
-                backup_path.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(item, dest)
+            shutil.copytree(item, backup_path / name, ignore=_ignore_skip_dirs)
 
         return backup_path
 
