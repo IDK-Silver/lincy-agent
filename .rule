@@ -1,0 +1,104 @@
+# .rule
+
+本檔定義 LLM Agent 的行為規範與編碼準則。詳細設計與架構見 `docs/dev/` 下相關文件。
+
+## 啟動流程
+
+> **執行指令**：收到任何請求前，先讀取 `docs/dev/index.md` 並依其指示行動。
+> **必讀設定檔**：修改 agent 行為、heartbeat、channel、tool、context 等相關程式碼前，先讀 `cfgs/agent.yaml` 了解目前的運行參數。
+
+開發文件位於 `docs/dev/`，採用動態載入機制：
+- 根據任務相關性載入對應文件
+- 新增文件後更新對應的 `index.md`
+
+**術語**：用戶提到「任務」「待辦」「進度」時，指專案待辦（由 `docs/dev/index.md` 定義），非 Claude Code 內建的 Task 工具。
+
+## 環境
+
+- **macOS only**：本專案僅在 macOS 上運行，可直接使用 macOS system API（CoreImage、Vision、FSEvents 等），透過 `pyobjc` 呼叫
+- 使用 uv 管理專案
+- 所有 Python 命令使用 `uv run`，例如：`uv run python`, `uv run pytest`
+
+## 核心原則
+
+像 Linus Torvalds 一樣：直接、務實、不過度工程。最好的程式碼是能運作、容易理解、不試圖太聰明的程式碼。
+
+要像正規專案一樣管理架構，要有遠見，不要硬編碼。
+
+### LLM Provider 設計準則
+- 修改 LLM provider/config/factory 前，先讀 `docs/dev/provider-api-spec.md` 與 `docs/dev/provider-architecture.md`
+- 先查 API 事實，再設計抽象；不要從現有程式碼或舊 YAML 反推 provider 規格
+- 統一的是 client 介面（如 `chat`/`chat_with_tools`），不是各 provider 的 config/payload 格式
+- provider-specific 的驗證、payload 映射、能力差異應放在各 provider config/client，不放共用層
+- `factory` 只做共通流程（timeout/retry/wrapping），不得加入 provider-specific 判斷
+- runtime feature（如 Copilot `force_agent`）在組裝層路由，不放進 YAML config 欄位
+- 不允許 silent ignore provider-specific kwargs；不支援就早停報錯
+- 架構/API 行為變更時，同步更新 `docs/dev/provider-api-spec.md`（官方事實 / adapter 規則 / 實測逆向）
+
+### Skill Runtime 設計準則
+- 修改 skill metadata、skill prerequisite、tool governance、synthetic skill context 注入前，先讀 `docs/dev/skill-runtime-governance.md`
+- Skill 進入點為 `SKILL.md`（含 YAML frontmatter），不再使用 `meta.yaml` + `guide.md`
+- 治理規則定義在 `cfgs/agent.yaml` 的 `tools.skill_governance.rules`，不寫在 skill 內
+- 若某 skill 治理某工具，優先做通用條件匹配（tool + args），不要為單一 channel 寫分支特判
+- 需要保證「執行前模型本輪已看過 guide」時，使用共用 responder preflight，不做 staged-planning 專屬旁路
+
+### Context Budget 準則
+- `context.soft_max_prompt_tokens` 是**保守安全值**，不是拿來逼近的目標
+- 設定時要保留足夠餘裕，讓一個正常 turn（含 tool loop / guide 注入 / 回覆）應能在此預算下完成
+- 文件中可強調它是操作上採用的「絕對安全預算」；但若 runtime 行為尚未把它當 provider hard cap，就不要把實作描述寫成 preflight 強制截斷
+
+### Prompt Cache 準則
+- 啟用 `cache_ttl: 1h` 的正常 brain request，在同一輪 prompt rebuild / tool loop 中，cache hit 應維持 **90% 以上**
+- system prompt + boot files 是 cache-safe prefix；任何 per-turn dynamic note 都只能待在 latest turn
+- 禁止在 `ContextBuilder.build()` 內直接讀 wall clock 組 prompt
+- 禁止新增獨立 system message 來放 `current_local_time`、`[Timing Notice]`、common ground 或其他 per-turn 注入內容
+- 禁止把 dynamic overlay 插到 latest turn 之前
+
+## 工作流程
+
+- 變更前先對齊 `docs/dev/` 相關文件
+- 修改聚焦且最小，避免牽動不相關部分
+- 架構/API/流程變更時，更新 `docs/` 文件
+
+### 升級遷移準則
+- 每次新增功能或功能更新（新增/修改 prompt、agent config、kernel 檔案結構等）都**必須**附帶對應的 migration script
+- Migration 放在 `src/chat_agent/workspace/migrations/`，繼承 `base.Migration`，實作 `upgrade()`
+- 檔名格式：`m{序號}_{描述}.py`，序號接續目前最大值遞增
+- `version` 對應本次發布版號；`summary` 用繁體中文簡述升級內容
+- 新 migration 須在 `migrations/__init__.py` 中註冊
+- 不寫 migration 的例外：純程式邏輯重構、不影響 workspace/kernel 檔案的變更
+
+## 程式碼標準
+
+### 語言規範
+- 註解：英文，解釋「為什麼」而非「做什麼」
+- Commit message：英文
+- 文件（.md）：繁體中文
+- 程式碼中不使用非 ASCII 字元或 emoji
+
+### 品質原則
+- 簡單可讀優於聰明
+- 功能優先，優化其次（且只在需要時）
+- 不添加未被要求的功能
+- 不重構正常運作的程式碼，除非有明確理由
+- 標準函式庫能做到就用標準函式庫
+- 早停機制：錯誤在載入/啟動時發現，不要延遲到執行時
+- 結構化資料使用 Pydantic 驗證
+
+### 組織結構
+- 模組化：依關注點拆分，避免單一檔案過大
+- 單一職責：每個檔案專注一件事
+- 清晰 API：只輸出必要的函式與型別，隱藏內部實作
+
+## 回應格式
+- 語氣：簡潔、直接
+- 引用檔案給出路徑（如 `docs/dev/design.md:12`）
+- 不複述 `docs/` 長篇內容，僅提供摘要與連結
+
+## 應避免
+
+- 添加使用者未要求的功能
+- 為不可能發生的問題做防禦性程式設計
+- 為一次性操作建立抽象
+- 沒有理由的相容層或功能旗標
+- 為瑣碎程式碼加冗長的型別提示和文件字串
