@@ -20,6 +20,14 @@ class TestWorkspaceBackup:
         memory.mkdir()
         (memory / "recent.md").write_text("some memory")
 
+        skills = tmp_path / "personal-skills"
+        skills.mkdir()
+        (skills / "index.md").write_text("skills index")
+
+        state = tmp_path / "state"
+        (state / "discord" / "media").mkdir(parents=True)
+        (state / "discord" / "media" / "big.jpg").write_bytes(b"x" * 1024)
+
         return tmp_path
 
     def test_create_backup_creates_directory(self, workspace):
@@ -37,6 +45,18 @@ class TestWorkspaceBackup:
         assert (path / "kernel" / "agents" / "brain").is_dir()
         assert (path / "memory" / "recent.md").exists()
         assert (path / "memory" / "recent.md").read_text() == "some memory"
+        assert (path / "personal-skills" / "index.md").exists()
+
+    def test_create_backup_excludes_runtime_state(self, workspace):
+        """Runtime bulk (state/ media, cache/) must never enter backups."""
+        (workspace / "cache").mkdir()
+        (workspace / "cache" / "blob.bin").write_bytes(b"y" * 64)
+
+        backup = WorkspaceBackup(workspace)
+        path = backup.create_backup("0.1.3")
+
+        assert not (path / "state").exists()
+        assert not (path / "cache").exists()
 
     def test_create_backup_excludes_backups_dir(self, workspace):
         """Backup must not recursively include the backups/ directory."""

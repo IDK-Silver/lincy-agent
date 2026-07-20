@@ -92,7 +92,8 @@ class WorkspaceInitializer:
     def upgrade_kernel(self) -> "MigrationResult":
         """Run pending migrations.
 
-        Creates a full workspace backup before applying any migration.
+        Backs up upgrade-managed dirs (kernel/memory/personal-skills)
+        before applying any migration.
 
         Returns:
             MigrationResult with applied versions and summaries.
