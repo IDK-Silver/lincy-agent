@@ -72,6 +72,23 @@ gui_manager:
 
 已移除：`allow_direct_screenshot`（manager 恆為直接看圖）。`gui_worker` 段保留（screenshot_by_subagent 用）。
 
+## 舊 Swift 主機部署（如 Intel Sonoma VM）
+
+upstream `Package.swift` 要求 `swift-tools-version: 6.2`；macOS 14（Sonoma）的 CLT 上限為 Swift 6.0.x，**無法自建**（oneshot 會報 tools version 錯誤）。`platforms` 為 `.macOS(.v14)`、程式無更高 API floor，因此 **binary 本身相容 Sonoma 與 x86_64**——只是要在別台編。流程：
+
+```bash
+# 在任一 Swift >= 6.2 機器（arm64 Mac 可直接交叉編譯 x86_64）
+swift build -c release --product OpenComputerUse --arch x86_64
+scp "$(swift build -c release --product OpenComputerUse --arch x86_64 --show-bin-path)/OpenComputerUse" \
+    <host>:.cache/chat_agent/ocu/<commit12>/OpenComputerUse
+```
+
+`ensure_binary()` 看到 cache 就不會要求 swift toolchain。或改設 `gui_manager.ax.binary_path` 指向任意路徑。注意：
+
+- 未簽章 binary **首次執行**會被 Gatekeeper/XProtect 掃描拖慢（舊 Intel 機可達分鐘級、看似掛死），一次性，之後正常
+- `doctor` 與 TCC 權限檢查須在 GUI session 內執行（純 ssh 無 window server 會卡住）；Accessibility + 螢幕錄製權限也要在 VM 的 GUI 裡授一次
+- pin commit 升級後需重新交叉編譯部署，直到該主機有 Swift >= 6.2
+
 ## 已知限制與後續
 
 - LINE 混合模式尚未跑過真實聊天任務回歸（建議用測試帳號驗證後再開放 LINE 相關 skill）。
