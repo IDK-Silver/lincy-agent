@@ -19,6 +19,7 @@ import anyio.to_thread
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from lincy.llm.http_error import format_http_error
 from lincy.llm.schema import (
     ContentPart,
     CodexCompactRequest,
@@ -753,7 +754,7 @@ class CodexProxyService:
             self._settings.request_timeout,
         )
         if status >= 400:
-            raise RuntimeError(f"HTTP {status}: {text[:200]}")
+            raise RuntimeError(format_http_error(status, text))
         payload = CodexUsagePayload.model_validate(json.loads(text))
         account = {"email": payload.email, "plan_type": payload.plan_type}
         usage = {"windows": _usage_windows(payload.rate_limit)}

@@ -263,6 +263,36 @@ async def test_usage_serves_stale_data_when_fetch_fails(monkeypatch, tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_usage_error_extracts_nested_openai_message(monkeypatch, tmp_path: Path):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(_token_for_usage("acct_1"))
+    body = {
+        "error": {
+            "message": "Your authentication token has been invalidated. Please try signing in again.",
+            "type": "invalid_request_error",
+            "code": "token_invalidated",
+            "param": None,
+        }
+    }
+    monkeypatch.setattr(
+        "codex_proxy.service._sync_usage_get",
+        _usage_get_stub([], body, status_code=401),
+    )
+    settings = _isolated_settings(tmp_path, token_path=store_path)
+    service = CodexProxyService(settings)
+
+    payload = await service.usage_snapshot()
+    account = payload["accounts"][0]
+
+    assert account["usage"] is None
+    assert account["error"] == (
+        "usage fetch failed: HTTP 401: Your authentication token has been "
+        "invalidated. Please try signing in again."
+    )
+    assert "{" not in account["error"]
+
+
+@pytest.mark.asyncio
 async def test_token_store_edits_invalidate_usage_snapshot_cache(tmp_path: Path):
     store_path = tmp_path / "tokens.json"
     StoredCodexTokenStore(store_path).save(_token_for_usage("acct_1", token_id="tok"))

@@ -14,6 +14,7 @@ import anyio.to_thread
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from lincy.llm.http_error import format_http_error
 from lincy.llm.schema import ClaudeCodeRequest
 
 from .auth import (
@@ -483,7 +484,7 @@ class ClaudeCodeProxyService:
         usage_resp = await client.get(OAUTH_USAGE_URL, headers=headers)
         for response in (profile_resp, usage_resp):
             if response.status_code >= 400:
-                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+                raise RuntimeError(format_http_error(response.status_code, response.text))
         profile = OAuthProfilePayload.model_validate(profile_resp.json())
         usage = OAuthUsagePayload.model_validate(usage_resp.json())
         account = {

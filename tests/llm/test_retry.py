@@ -1,5 +1,6 @@
 """Tests for generic LLM retry wrapper."""
 
+import json
 import logging
 
 import httpx
@@ -9,6 +10,7 @@ from lincy.core.schema import OllamaNativeConfig, OllamaNativeToggleThinkingConf
 from lincy.llm.factory import create_client
 from lincy.llm.http_error import (
     classify_http_status_error,
+    format_http_error,
     format_http_status_error,
 )
 from lincy.llm.retry import (
@@ -200,6 +202,24 @@ def test_classify_http_400_provider_api():
     assert (
         format_http_status_error(err)
         == "HTTP 400 (provider-api): Model does not support this feature."
+    )
+
+
+def test_format_http_error_extracts_nested_openai_message():
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Your authentication token has been invalidated. Please try signing in again.",
+                "type": "invalid_request_error",
+                "code": "token_invalidated",
+                "param": None,
+            }
+        }
+    )
+
+    assert format_http_error(401, body) == (
+        "HTTP 401: Your authentication token has been invalidated. "
+        "Please try signing in again."
     )
 
 
