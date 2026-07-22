@@ -118,6 +118,7 @@ Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
 - 用量改為對齊的單欄 meter rows（每帳號一個 grid，欄位對齊）：一列一個時間窗，依序 label、bar（<70% 黑、70-90% 琥珀、≥90% 紅）、% 與重置時間，涵蓋 5h、Week，以及 model-scoped weekly（如 Fable）；model-scoped 列來源是 proxy 解析 OAuth usage `limits[]` 中 `kind=weekly_scoped` 的項目（以 `scope.model.display_name` 當 label），在 `/api/claude-accounts` 回應以 `usage.seven_day_scoped` 欄位輸出
 - 底部列出 active 帳號可用的 model id（來源 proxy `/v1/models` passthrough），呈現為 mono 文字列表（`·` 分隔）；預設收合，點「Models (N)」disclosure 展開
 - 資料來源 `/api/claude-accounts`，3 分鐘輪詢；卡片右上有手動 Refresh 按鈕，帶 `?refresh=true` 繞過 proxy 端 60s snapshot 快取強制重抓
+- 前端另用 `sessionStorage`（`lincy.proxy-accounts.claude`）快取上次成功回應：F5 / remount 先立刻畫出舊資料，背景再打 API；同 tab 關閉後清掉
 - 帳號用量抓取失敗（如 OAuth endpoint 429）時顯示上次成功資料，錯誤降為灰字 `stale — ...` 註記；完全沒有資料才顯示紅字錯誤
 
 編輯操作（等價於 `proxy claude-code login` / `tokens promote` / `tokens remove`）：
@@ -137,7 +138,7 @@ Overview 和 Requests 之間用 tab bar 切換（`MonitorTabs.vue`）。
 - 用量列直接對應 `/api/codex-accounts` 回應的 `usage.windows[]`：每列 `label`（例：`5h`、`Week`，由 proxy 端 `limit_window_seconds` 推導）、`utilization`、`resets_at`；label 不是 `\d+h` 形式時重置時間帶日期（`MM/DD HH:MM`），否則只顯示 `HH:MM`
 - plan 標籤：`account.plan_type` title-case（例：`plus` → `Plus`）；`source === "codex_auth"` 的帳號（讀自官方 Codex CLI 的 `~/.codex/auth.json`，不在本專案 token store 裡）在標籤後綴 ` · codex cli`，並隱藏 promote/remove 按鈕，因為這類帳號無法透過 proxy store API 操作
 - `models` 目前固定回空陣列，沿用 Claude 卡片同一顆 `v-if`，故不顯示 Models disclosure
-- 資料來源 `/api/codex-accounts`，3 分鐘輪詢；同 Claude 卡片提供手動 Refresh（`?refresh=true`）
+- 資料來源 `/api/codex-accounts`，3 分鐘輪詢；同 Claude 卡片提供手動 Refresh（`?refresh=true`）；同樣用 `sessionStorage`（`lincy.proxy-accounts.codex`）做 F5 hydrate
 
 登入流程與 Claude 卡片的手動貼 `code#state` 不同，改成「自動完成為主、手動貼網址為備援」：
 

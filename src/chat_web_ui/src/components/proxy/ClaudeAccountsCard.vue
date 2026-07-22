@@ -12,11 +12,14 @@ import {
   type ClaudeAccountsResponse,
   type ClaudeLoginBegin,
 } from '@/api/client'
+import { loadProxyAccountsCache, saveProxyAccountsCache } from '@/lib/proxyAccountsCache'
 
 const REFRESH_MS = 180_000
 
-const data = ref<ClaudeAccountsResponse | null>(null)
-const loading = ref(true)
+// F5 / remount: paint last snapshot immediately, then refresh in background.
+const cached = loadProxyAccountsCache<ClaudeAccountsResponse>('claude')
+const data = ref<ClaudeAccountsResponse | null>(cached)
+const loading = ref(cached === null)
 const refreshing = ref(false)
 const actionBusy = ref(false)
 const actionError = ref<string | null>(null)
@@ -35,6 +38,7 @@ async function refresh(force = false) {
   refreshing.value = true
   try {
     data.value = await fetchClaudeAccounts(force)
+    saveProxyAccountsCache('claude', data.value)
   } catch {
     data.value = { available: false, accounts: [], models: [], error: 'request failed' }
   } finally {

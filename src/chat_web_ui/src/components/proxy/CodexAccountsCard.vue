@@ -13,12 +13,15 @@ import {
   type CodexAccountsResponse,
   type CodexLoginBegin,
 } from '@/api/client'
+import { loadProxyAccountsCache, saveProxyAccountsCache } from '@/lib/proxyAccountsCache'
 
 const REFRESH_MS = 180_000
 const LOGIN_POLL_MS = 2_000
 
-const data = ref<CodexAccountsResponse | null>(null)
-const loading = ref(true)
+// F5 / remount: paint last snapshot immediately, then refresh in background.
+const cached = loadProxyAccountsCache<CodexAccountsResponse>('codex')
+const data = ref<CodexAccountsResponse | null>(cached)
+const loading = ref(cached === null)
 const refreshing = ref(false)
 const actionBusy = ref(false)
 const actionError = ref<string | null>(null)
@@ -39,6 +42,7 @@ async function refresh(force = false) {
   refreshing.value = true
   try {
     data.value = await fetchCodexAccounts(force)
+    saveProxyAccountsCache('codex', data.value)
   } catch {
     data.value = { available: false, accounts: [], models: [], error: 'request failed' }
   } finally {
