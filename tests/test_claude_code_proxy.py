@@ -221,6 +221,87 @@ async def test_usage_snapshot_serves_stale_data_when_fetch_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_usage_auth_failure_is_unusable_not_error(monkeypatch, tmp_path):
+    """Invalidated store tokens stay listed so they can be removed, but 401
+    is 'no usable account' — not a red usage-fetch failure."""
+
+    store = _point_store_at(monkeypatch, tmp_path)
+    store.save(
+        _fresh_token(
+            token_id="tok",
+            access_token="dead",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+
+    class _OAuthClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str, headers: dict | None = None):
+            return _AsyncResponse(
+                {
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Invalid authentication credentials",
+                    }
+                },
+                status_code=401,
+            )
+
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _OAuthClient(),
+    )
+    service = ClaudeCodeProxyService(ClaudeCodeProxySettings())
+
+    payload = await service.usage_snapshot()
+    account = payload["accounts"][0]
+
+    assert account["usage"] is None
+    assert account["status"] == "unusable"
+    assert account["error"] is None
+    assert payload["models"] == []
+
+
+@pytest.mark.asyncio
+async def test_usage_auth_failure_omits_env_override(monkeypatch):
+    """Dead --access-token / env credential must not surface as an error row."""
+
+    class _OAuthClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str, headers: dict | None = None):
+            return _AsyncResponse(
+                {
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Invalid authentication credentials",
+                    }
+                },
+                status_code=401,
+            )
+
+    monkeypatch.setattr(
+        "claude_code_proxy.service.httpx.AsyncClient",
+        lambda timeout: _OAuthClient(),
+    )
+    service = ClaudeCodeProxyService(ClaudeCodeProxySettings(access_token="tok"))
+
+    payload = await service.usage_snapshot()
+
+    assert payload["accounts"] == []
+    assert payload["models"] == []
+
+
+@pytest.mark.asyncio
 async def test_proxy_service_skips_effort_beta_for_non_effort_model(monkeypatch):
     effects = [(200, {"content": [{"type": "text", "text": "ok"}]})]
     calls: list[dict] = []

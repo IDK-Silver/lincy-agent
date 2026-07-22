@@ -94,6 +94,17 @@ def _now() -> float:
     return datetime.now(tz=UTC).timestamp()
 
 
+def _is_usage_auth_failure(exc: BaseException) -> bool:
+    """True when a usage fetch failed because the credential is gone/invalid.
+
+    Missing or invalidated auth is not an operational error for the dashboard:
+    it means there is no usable account, not that usage reporting broke.
+    """
+
+    text = str(exc)
+    return "HTTP 401" in text or "HTTP 403" in text
+
+
 class _TolerantModel(BaseModel):
     """Parse reverse-engineered payloads without breaking on unknown fields."""
 
@@ -663,11 +674,15 @@ class CodexProxyService:
     async def usage_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         """Report account identity and rate-limit windows per pool entry.
 
-        One failing account must not break the snapshot: fetch errors are
-        reported per entry. The whole snapshot is cached briefly (the lock
-        also collapses concurrent dashboard refreshes into one upstream
-        sweep); force_refresh bypasses the cache read for a manual refresh,
-        but still stores the fresh result.
+        One failing account must not break the snapshot: transient fetch
+        errors are reported per entry. Auth failures (401/403) mean the
+        credential is gone — the official CLI fallback is omitted (no
+        account, not an error), and store tokens stay as ``unusable``
+        without an error string so the dashboard can show empty/neutral
+        rather than a red failure. The whole snapshot is cached briefly
+        (the lock also collapses concurrent dashboard refreshes into one
+        upstream sweep); force_refresh bypasses the cache read for a
+        manual refresh, but still stores the fresh result.
         """
 
         async with self._usage_lock:
@@ -679,39 +694,65 @@ class CodexProxyService:
             entries = await self._tokens.pool_entries()
             accounts: list[dict[str, Any]] = []
             active_seen = False
-            for priority, entry in enumerate(entries):
+            for entry in entries:
                 item: dict[str, Any] = {
                     "id": entry.token_id,
                     "source": entry.source,
-                    "priority": priority,
+                    "priority": len(accounts),
                     "status": "unusable",
                     "error": entry.error,
                     "account": None,
                     "usage": None,
                     "stale": False,
                 }
-                if entry.access_token is not None:
-                    if entry.benched:
-                        item["status"] = "benched"
-                    elif not active_seen:
-                        item["status"] = "active"
-                        active_seen = True
-                    else:
-                        item["status"] = "standby"
-                    try:
-                        account, usage = await self._fetch_account_usage(
-                            access_token=entry.access_token,
-                            account_id=entry.account_id,
-                        )
-                        item["account"] = account
-                        item["usage"] = usage
-                        self._last_good_usage[entry.token_id] = (account, usage)
-                    except Exception as exc:
-                        item["error"] = f"usage fetch failed: {exc}"
-                        last_good = self._last_good_usage.get(entry.token_id)
-                        if last_good is not None:
-                            item["account"], item["usage"] = last_good
-                            item["stale"] = True
+                if entry.access_token is None:
+                    # Official CLI fallback is implicit: unusable means absent,
+                    # not a red error row on an empty store.
+                    if entry.source == "codex_auth":
+                        continue
+                    accounts.append(item)
+                    continue
+
+                try:
+                    account, usage = await self._fetch_account_usage(
+                        access_token=entry.access_token,
+                        account_id=entry.account_id,
+                    )
+                except Exception as exc:
+                    if _is_usage_auth_failure(exc):
+                        # Signed-out / invalidated credential: no account, not
+                        # a usage-endpoint failure. Drop the official fallback;
+                        # keep store tokens so the user can remove/re-login.
+                        if entry.source == "codex_auth":
+                            continue
+                        item["error"] = None
+                        accounts.append(item)
+                        continue
+                    item["error"] = f"usage fetch failed: {exc}"
+                    last_good = self._last_good_usage.get(entry.token_id)
+                    if last_good is not None:
+                        item["account"], item["usage"] = last_good
+                        item["stale"] = True
+                        if entry.benched:
+                            item["status"] = "benched"
+                        elif not active_seen:
+                            item["status"] = "active"
+                            active_seen = True
+                        else:
+                            item["status"] = "standby"
+                    accounts.append(item)
+                    continue
+
+                item["account"] = account
+                item["usage"] = usage
+                self._last_good_usage[entry.token_id] = (account, usage)
+                if entry.benched:
+                    item["status"] = "benched"
+                elif not active_seen:
+                    item["status"] = "active"
+                    active_seen = True
+                else:
+                    item["status"] = "standby"
                 accounts.append(item)
 
             # Codex has no models passthrough; keep the key for shape parity

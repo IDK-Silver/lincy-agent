@@ -263,7 +263,10 @@ async def test_usage_serves_stale_data_when_fetch_fails(monkeypatch, tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_usage_error_extracts_nested_openai_message(monkeypatch, tmp_path: Path):
+async def test_usage_auth_failure_is_unusable_not_error(monkeypatch, tmp_path: Path):
+    """Invalidated store tokens stay listed so they can be removed, but 401
+    is 'no usable account' — not a red usage-fetch failure."""
+
     store_path = tmp_path / "tokens.json"
     StoredCodexTokenStore(store_path).save(_token_for_usage("acct_1"))
     body = {
@@ -285,9 +288,76 @@ async def test_usage_error_extracts_nested_openai_message(monkeypatch, tmp_path:
     account = payload["accounts"][0]
 
     assert account["usage"] is None
+    assert account["status"] == "unusable"
+    assert account["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_usage_auth_failure_omits_official_cli_fallback(monkeypatch, tmp_path: Path):
+    """Dead ~/.codex/auth.json must not surface as a dashboard error row."""
+
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-04-11T01:02:03Z",
+                "tokens": {
+                    "access_token": _make_fake_jwt(account_id="acct_cli"),
+                    "refresh_token": "refresh-token",
+                    "account_id": "acct_cli",
+                },
+            }
+        )
+    )
+    body = {
+        "error": {
+            "message": "Your authentication token has been invalidated. Please try signing in again.",
+            "type": "invalid_request_error",
+            "code": "token_invalidated",
+        }
+    }
+    monkeypatch.setattr(
+        "codex_proxy.service._sync_usage_get",
+        _usage_get_stub([], body, status_code=401),
+    )
+    settings = _isolated_settings(
+        tmp_path, codex_auth_path=auth_path, token_path=tmp_path / "tokens.json"
+    )
+    service = CodexProxyService(settings)
+
+    payload = await service.usage_snapshot()
+
+    assert payload["accounts"] == []
+
+
+@pytest.mark.asyncio
+async def test_usage_error_extracts_nested_openai_message_for_transient_failure(
+    monkeypatch, tmp_path: Path
+):
+    store_path = tmp_path / "tokens.json"
+    StoredCodexTokenStore(store_path).save(_token_for_usage("acct_1"))
+    body = {
+        "error": {
+            "message": "Rate limit reached for requests",
+            "type": "requests",
+            "code": "rate_limit_exceeded",
+            "param": None,
+        }
+    }
+    monkeypatch.setattr(
+        "codex_proxy.service._sync_usage_get",
+        _usage_get_stub([], body, status_code=429),
+    )
+    settings = _isolated_settings(tmp_path, token_path=store_path)
+    service = CodexProxyService(settings)
+
+    payload = await service.usage_snapshot()
+    account = payload["accounts"][0]
+
+    assert account["usage"] is None
     assert account["error"] == (
-        "usage fetch failed: HTTP 401: Your authentication token has been "
-        "invalidated. Please try signing in again."
+        "usage fetch failed: HTTP 429: Rate limit reached for requests"
     )
     assert "{" not in account["error"]
 

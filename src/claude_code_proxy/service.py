@@ -80,6 +80,17 @@ def _now() -> float:
     return datetime.now(tz=UTC).timestamp()
 
 
+def _is_usage_auth_failure(exc: BaseException) -> bool:
+    """True when a usage fetch failed because the credential is gone/invalid.
+
+    Missing or invalidated auth is not an operational error for the dashboard:
+    it means there is no usable account, not that usage reporting broke.
+    """
+
+    text = str(exc)
+    return "HTTP 401" in text or "HTTP 403" in text
+
+
 class _TolerantModel(BaseModel):
     """Parse reverse-engineered payloads without breaking on unknown fields."""
 
@@ -390,8 +401,12 @@ class ClaudeCodeProxyService:
     async def usage_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         """Report account identity, 5h/7d utilization, and models per pool token.
 
-        One failing account must not break the snapshot: fetch errors are
-        reported per entry. The whole snapshot is cached briefly (the lock also
+        One failing account must not break the snapshot: transient fetch
+        errors are reported per entry. Auth failures (401/403) mean the
+        credential is gone — env override is omitted (no account, not an
+        error), and store tokens stay as ``unusable`` without an error
+        string so the dashboard can show empty/neutral rather than a red
+        failure. The whole snapshot is cached briefly (the lock also
         collapses concurrent dashboard refreshes into one upstream sweep);
         force_refresh bypasses the cache read for the dashboard's manual
         refresh button, but still stores the fresh result.
@@ -408,38 +423,63 @@ class ClaudeCodeProxyService:
             models: list[dict[str, Any]] = []
             active_token: str | None = None
             async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
-                for priority, entry in enumerate(entries):
+                for entry in entries:
                     item: dict[str, Any] = {
                         "id": entry.token_id,
                         "source": entry.source,
-                        "priority": priority,
+                        "priority": len(accounts),
                         "status": "unusable",
                         "error": entry.error,
                         "account": None,
                         "usage": None,
                         "stale": False,
                     }
-                    if entry.access_token is not None:
-                        if entry.benched:
-                            item["status"] = "benched"
-                        elif active_token is None:
-                            item["status"] = "active"
-                            active_token = entry.access_token
-                        else:
-                            item["status"] = "standby"
-                        try:
-                            account, usage = await self._fetch_account_usage(
-                                client, entry.access_token
-                            )
-                            item["account"] = account
-                            item["usage"] = usage
-                            self._last_good_usage[entry.token_id] = (account, usage)
-                        except Exception as exc:
-                            item["error"] = f"usage fetch failed: {exc}"
-                            last_good = self._last_good_usage.get(entry.token_id)
-                            if last_good is not None:
-                                item["account"], item["usage"] = last_good
-                                item["stale"] = True
+                    if entry.access_token is None:
+                        # Env override is implicit: unusable means absent.
+                        if entry.source == "env_override":
+                            continue
+                        accounts.append(item)
+                        continue
+
+                    try:
+                        account, usage = await self._fetch_account_usage(
+                            client, entry.access_token
+                        )
+                    except Exception as exc:
+                        if _is_usage_auth_failure(exc):
+                            # Signed-out / invalidated credential: no account,
+                            # not a usage-endpoint failure. Drop env override;
+                            # keep store tokens so the user can remove/re-login.
+                            if entry.source == "env_override":
+                                continue
+                            item["error"] = None
+                            accounts.append(item)
+                            continue
+                        item["error"] = f"usage fetch failed: {exc}"
+                        last_good = self._last_good_usage.get(entry.token_id)
+                        if last_good is not None:
+                            item["account"], item["usage"] = last_good
+                            item["stale"] = True
+                            if entry.benched:
+                                item["status"] = "benched"
+                            elif active_token is None:
+                                item["status"] = "active"
+                                active_token = entry.access_token
+                            else:
+                                item["status"] = "standby"
+                        accounts.append(item)
+                        continue
+
+                    item["account"] = account
+                    item["usage"] = usage
+                    self._last_good_usage[entry.token_id] = (account, usage)
+                    if entry.benched:
+                        item["status"] = "benched"
+                    elif active_token is None:
+                        item["status"] = "active"
+                        active_token = entry.access_token
+                    else:
+                        item["status"] = "standby"
                     accounts.append(item)
 
             if active_token is not None:
